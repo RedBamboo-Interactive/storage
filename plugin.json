@@ -1,0 +1,26 @@
+{
+  "id": "storage",
+  "name": "Storage",
+  "version": "0.1.0",
+  "kernelApi": "^0.1.0",
+  "description": "Visualize RedLeaf storage across scratch, Agent workspaces, and application data with guarded cleanup.",
+  "icon": "ph-hard-drives",
+  "color": "orange",
+  "requires": ["entities"],
+  "backend": { "assembly": "Leaf.Plugins.Storage" },
+  "frontend": {
+    "package": "@redbamboo/plugin-storage",
+    "route": "/apps/storage",
+    "pwa": false,
+    "sections": [
+      { "id": "overview", "name": "Storage", "icon": "ph-bold ph-hard-drives", "path": ".", "order": 1, "default": true }
+    ]
+  },
+  "permissions": [
+    {
+      "kind": "fs",
+      "target": "redleaf-storage",
+      "reason": "Measure RedLeaf-managed storage and quarantine explicitly selected disposable scratch items"
+    }
+  ]
+}

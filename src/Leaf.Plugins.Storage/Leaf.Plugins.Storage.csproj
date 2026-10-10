@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Leaf.Plugins.Storage</RootNamespace>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- The SDK is the interface, the kernel is the runtime: a plugin references the
+       Leaf.Sdk PACKAGE and never kernel source. At load time the kernel supplies
+       Leaf.Sdk from its own context — the packaging script strips the dll from the
+       publish output (shipping a copy breaks ILeafPlugin type identity).
+       Working against a kernel checkout instead? Build with
+       -p:LeafSdkProject=<path>\src\Leaf.Sdk\Leaf.Sdk.csproj -->
+  <ItemGroup Condition="'$(LeafSdkProject)' == ''">
+    <PackageReference Include="Leaf.Sdk" Version="0.1.*" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(LeafSdkProject)' != ''">
+    <ProjectReference Include="$(LeafSdkProject)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The manifest the loader reads from disk is also the Manifest property this
+         assembly exposes — embedding the same file keeps them from drifting. -->
+    <EmbeddedResource Include="..\..\plugin.json" LogicalName="plugin.json" />
+  </ItemGroup>
+
+</Project>

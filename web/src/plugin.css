@@ -1,0 +1,119 @@
+@layer theme, base, components, utilities, utilities;
+@import "@redbamboo/ui/tokens.css";
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@source "./";
+
+.storage-treemap {
+  background:
+    radial-gradient(circle at 20% 10%, rgb(from var(--primary) r g b / .07), transparent 34%),
+    rgb(from var(--contrast) r g b / .025);
+}
+.storage-tile {
+  position: absolute;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / .13);
+  transition: filter 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.storage-tile:hover { filter: brightness(1.18); z-index: 2; }
+.storage-tile[data-selected="true"] {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary), 0 0 0 1px rgb(from var(--primary) r g b / .3);
+  z-index: 3;
+}
+.storage-tile-label {
+  text-shadow: 0 1px 2px rgb(0 0 0 / .8);
+}
+.storage-button {
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  border-radius: .45rem;
+  padding: .45rem .7rem;
+  font-size: .75rem;
+  font-weight: 600;
+  transition: background-color 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+.storage-button:disabled { opacity: .45; cursor: not-allowed; }
+.storage-button-muted { background: rgb(from var(--contrast) r g b / .06); color: var(--text-muted); }
+.storage-button-muted:hover:not(:disabled) { background: rgb(from var(--contrast) r g b / .1); color: var(--contrast); }
+.storage-button-primary { background: var(--primary); color: var(--primary-foreground, white); }
+.storage-button-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.storage-button-danger { background: rgb(239 68 68 / .16); color: rgb(252 165 165); }
+.storage-button-danger:hover:not(:disabled) { background: rgb(239 68 68 / .25); }
+.storage-icon-button {
+  width: 2rem;
+  height: 2rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: .45rem;
+  color: var(--text-muted);
+}
+.storage-icon-button:hover { background: rgb(from var(--contrast) r g b / .08); color: var(--contrast); }
+.storage-area-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .45rem;
+  flex: 0 0 auto;
+  border: 1px solid rgb(from var(--contrast) r g b / .08);
+  border-radius: .55rem;
+  padding: .45rem .7rem;
+  color: var(--text-muted);
+  font-size: .75rem;
+}
+.storage-area-chip strong { color: var(--contrast); font-variant-numeric: tabular-nums; }
+.storage-area-chip em {
+  border-radius: 999px;
+  background: rgb(from var(--contrast) r g b / .07);
+  padding: .08rem .35rem;
+  font-style: normal;
+  font-size: .6rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.storage-area-chip:hover { background: rgb(from var(--contrast) r g b / .05); }
+.storage-area-chip-active { border-color: var(--primary); background: rgb(from var(--primary) r g b / .1); color: var(--contrast); }
+.storage-note {
+  display: flex;
+  align-items: flex-start;
+  gap: .5rem;
+  border-radius: .6rem;
+  background: rgb(from var(--contrast) r g b / .04);
+  padding: .7rem;
+  color: var(--text-muted);
+  font-size: .75rem;
+  line-height: 1.45;
+}
+.storage-note i { color: var(--primary); margin-top: .12rem; }
+.storage-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / .68);
+  backdrop-filter: blur(5px);
+}
+.storage-modal {
+  width: min(100%, 28rem);
+  border: 1px solid rgb(from var(--contrast) r g b / .12);
+  border-radius: 1rem;
+  background: var(--base, #111318);
+  padding: 1.25rem;
+  box-shadow: 0 24px 80px rgb(0 0 0 / .48);
+}
+.storage-modal-wide { width: min(100%, 50rem); }
+.storage-input {
+  min-width: 0;
+  border: 1px solid rgb(from var(--contrast) r g b / .12);
+  border-radius: .45rem;
+  background: rgb(from var(--contrast) r g b / .04);
+  padding: .45rem .6rem;
+  color: var(--contrast);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: .72rem;
+}
+.storage-input:focus { outline: none; border-color: var(--primary); }
