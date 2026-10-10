@@ -9,6 +9,39 @@
     radial-gradient(circle at 20% 10%, rgb(from var(--primary) r g b / .07), transparent 34%),
     rgb(from var(--contrast) r g b / .025);
 }
+
+.storage-root {
+  background: var(--color-surface-base, var(--background));
+}
+
+.storage-metrics {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.storage-main {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.storage-map-panel {
+  min-height: 26rem;
+}
+
+@media (min-width: 64rem) {
+  .storage-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .storage-main {
+    grid-template-columns: minmax(0, 1fr) 20rem;
+    min-height: 34rem;
+    height: calc(100dvh - 18rem);
+    max-height: 52rem;
+  }
+
+  .storage-map-panel {
+    min-height: 0;
+  }
+}
 .storage-tile {
   position: absolute;
   overflow: hidden;

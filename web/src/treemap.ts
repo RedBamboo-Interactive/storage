@@ -26,13 +26,17 @@ function split(nodes: StorageNode[], bounds: Bounds, result: Tile[]) {
   }
   const total = nodes.reduce((sum, node) => sum + Math.max(1, node.sizeBytes), 0)
   let leftTotal = 0
-  let splitIndex = 1
-  for (; splitIndex < nodes.length; splitIndex++) {
-    const next = leftTotal + Math.max(1, nodes[splitIndex - 1].sizeBytes)
-    if (next > total / 2 && splitIndex > 1) break
+  let splitIndex = 0
+  while (splitIndex < nodes.length - 1) {
+    const next = leftTotal + Math.max(1, nodes[splitIndex].sizeBytes)
+    if (splitIndex > 0 && next > total / 2) break
     leftTotal = next
+    splitIndex++
   }
-  if (leftTotal === 0) leftTotal = Math.max(1, nodes[0].sizeBytes)
+  if (splitIndex === 0) {
+    splitIndex = 1
+    leftTotal = Math.max(1, nodes[0].sizeBytes)
+  }
   const ratio = Math.min(.92, Math.max(.08, leftTotal / total))
   const first = nodes.slice(0, splitIndex)
   const second = nodes.slice(splitIndex)

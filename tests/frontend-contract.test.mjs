@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { readFile } from "node:fs/promises"
 import test from "node:test"
+import { layoutTreemap } from "../web/src/treemap.ts"
 
 const root = new URL("../", import.meta.url)
 
@@ -23,4 +24,22 @@ test("frontend distinguishes logical workspace usage", async () => {
   const app = await readFile(new URL("web/src/App.tsx", root), "utf8")
   assert.match(app, /Logical workspaces/)
   assert.match(app, /already backed by RedLeaf's database/)
+})
+
+test("Storage owns its responsive shell layout", async () => {
+  const app = await readFile(new URL("web/src/App.tsx", root), "utf8")
+  const css = await readFile(new URL("web/src/plugin.css", root), "utf8")
+  assert.match(app, /storage-root/)
+  assert.match(app, /storage-metrics/)
+  assert.match(app, /storage-main/)
+  assert.match(css, /@media \(min-width: 64rem\)/)
+  assert.match(css, /grid-template-columns: repeat\(4/)
+  assert.match(css, /grid-template-columns: minmax\(0, 1fr\) 20rem/)
+})
+
+test("treemap always terminates for an exact half split", () => {
+  const node = (id) => ({ id, sizeBytes: 10 })
+  const tiles = layoutTreemap([node("left"), node("right")])
+  assert.deepEqual(tiles.map(tile => tile.node.id).sort(), ["left", "right"])
+  assert.equal(tiles.reduce((sum, tile) => sum + tile.width * tile.height, 0), 10_000)
 })

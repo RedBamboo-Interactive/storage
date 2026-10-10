@@ -151,7 +151,7 @@ export function StorageApp() {
   }
 
   return (
-    <div className="h-full min-h-0 flex flex-col bg-base text-contrast">
+    <div className="storage-root h-full min-h-0 flex flex-col text-contrast">
       <PanelHeader
         leading={<i className="ph-bold ph-hard-drives text-primary" />}
         title="Storage"
@@ -195,7 +195,7 @@ export function StorageApp() {
         </div>
       ) : (
         <>
-          <div className="px-4 py-3 border-b border-overlay-6 grid grid-cols-2 lg:grid-cols-4 gap-2">
+          <div className="storage-metrics px-4 py-3 border-b border-overlay-6 grid gap-2">
             <Metric icon="ph-bold ph-disc" label="Physical Leaf data" value={formatBytes(snapshot.physicalBytes)} />
             <Metric icon="ph-bold ph-folders" label="Logical workspaces" value={formatBytes(snapshot.logicalBytes)} />
             <Metric icon="ph-bold ph-files" label="Files scanned"
@@ -217,8 +217,8 @@ export function StorageApp() {
             ))}
           </div>
 
-          <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_20rem]">
-            <section className="min-h-[26rem] lg:min-h-0 flex flex-col border-r border-overlay-6">
+          <div className="storage-main flex-1 min-h-0 grid">
+            <section className="storage-map-panel flex flex-col border-r border-overlay-6">
               <div className="h-10 px-3 border-b border-overlay-6 flex items-center gap-1 overflow-x-auto">
                 {breadcrumbs.map((node, index) => (
                   <span key={node.id} className="flex items-center gap-1">
