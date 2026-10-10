@@ -33,6 +33,19 @@ try
         "marked inactive execution is quarantinable");
     Assert(area.Root.Children.Any(node => node.Kind == "aggregate"), "large sibling sets are bounded");
 
+    var deep = Path.Combine(execution, "one", "two", "three", "four", "five");
+    Directory.CreateDirectory(deep);
+    await File.WriteAllBytesAsync(Path.Combine(deep, "deep.bin"), new byte[8192]);
+    var bounded = scanner.Scan(new ScanArea("scratch", "Scratch", @"S:\", "physical", false,
+        root, AgentNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Nova" }),
+        CancellationToken.None);
+    var boundedExecution = bounded.Root.Children.Single(node => node.Name == "Nova")
+        .Children.Single(node => node.Name == "abc123");
+    Assert(MaxDepth(boundedExecution) <= 3, "visual descendants have a fixed depth bound");
+    Assert(boundedExecution.SizeBytes >= 4096 + 8192, "depth compaction preserves exact totals");
+    Assert(Flatten(boundedExecution).Any(node => node.Kind == "aggregate"),
+        "depth compaction emits a protected aggregate");
+
     StorageService.EnsureBelow(root, loose);
     var escaped = false;
     try { StorageService.EnsureBelow(root, Path.Combine(Path.GetDirectoryName(root)!, "outside")); }
@@ -49,4 +62,15 @@ finally
 static void Assert(bool condition, string name)
 {
     if (!condition) throw new InvalidOperationException("Failed: " + name);
+}
+
+static int MaxDepth(StorageNode node)
+    => node.Children.Count == 0 ? 0 : 1 + node.Children.Max(MaxDepth);
+
+static IEnumerable<StorageNode> Flatten(StorageNode node)
+{
+    yield return node;
+    foreach (var child in node.Children)
+        foreach (var descendant in Flatten(child))
+            yield return descendant;
 }

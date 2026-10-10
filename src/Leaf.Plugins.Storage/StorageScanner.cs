@@ -5,7 +5,8 @@ namespace Leaf.Plugins.Storage;
 
 internal sealed class StorageScanner(Action<string, long, long, long> report)
 {
-    private const int MaxChildren = 120;
+    private const int MaxChildren = 64;
+    private const int MaxVisibleDepth = 4;
     private static readonly TimeSpan ActiveSafetyWindow = TimeSpan.FromMinutes(30);
     private readonly Action<string, long, long, long> _report = report;
     private long _bytes;
@@ -87,7 +88,11 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
         Interlocked.Increment(ref _directories);
         Report(area.Name);
 
-        var accumulator = new NodeAccumulator(MaxChildren);
+        // The scanner still walks the complete tree so totals remain exact, but the
+        // browser snapshot is deliberately shallow. Retaining even a bounded set at
+        // every directory can still produce hundreds of thousands of JSON nodes on
+        // package caches and PostgreSQL data directories.
+        var accumulator = new NodeAccumulator(depth >= MaxVisibleDepth ? 0 : MaxChildren);
         string? error = null;
         IEnumerable<string> entries;
         try { entries = Directory.EnumerateFileSystemEntries(path); }
@@ -314,6 +319,11 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
         public void Add(StorageNode node)
         {
             Accumulate(node.SizeBytes, node.FileCount, node.DirectoryCount, node.ModifiedAt);
+            if (capacity <= 0)
+            {
+                Drop(node);
+                return;
+            }
             if (_largest.Count < capacity)
             {
                 _largest.Enqueue(node, node.SizeBytes);
@@ -333,6 +343,13 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
         public void AddFile(Func<StorageNode> factory, long size, DateTimeOffset modified)
         {
             Accumulate(size, 1, 0, modified);
+            if (capacity <= 0)
+            {
+                _otherBytes += size;
+                _otherFiles++;
+                _otherModified = Max(_otherModified, modified);
+                return;
+            }
             if (_largest.Count >= capacity)
             {
                 _largest.TryPeek(out _, out var smallest);
