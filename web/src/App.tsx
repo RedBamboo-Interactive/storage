@@ -70,6 +70,7 @@ export function StorageApp() {
   const selected = useMemo(() => area ? findNode(area.root, selectedId) ?? focus : null, [area, selectedId, focus])
   const breadcrumbs = useMemo(() => area && focus ? findPath(area.root, focus.id) : [], [area, focus])
   const tiles = useMemo(() => layoutTreemap(focus?.children ?? []), [focus])
+  const parent = breadcrumbs.length > 1 ? breadcrumbs[breadcrumbs.length - 2] : null
 
   useEffect(() => {
     if (!snapshot?.areas.length) return
@@ -88,6 +89,18 @@ export function StorageApp() {
   const openNode = (node: StorageNode) => {
     setSelectedId(node.id)
     if (node.children.length > 0) setFocusId(node.id)
+  }
+
+  const goHome = () => {
+    if (!area) return
+    setFocusId(area.root.id)
+    setSelectedId(area.root.id)
+  }
+
+  const goUp = () => {
+    if (!parent) return
+    setFocusId(parent.id)
+    setSelectedId(parent.id)
   }
 
   const requestCleanup = async () => {
@@ -201,7 +214,7 @@ export function StorageApp() {
             <Metric icon="ph-bold ph-files" label="Files scanned"
               value={snapshot.areas.reduce((sum, item) => sum + item.root.fileCount, 0).toLocaleString()} />
             <Metric icon="ph-bold ph-clock" label="Snapshot"
-              value={relativeTime(snapshot.completedAt)} />
+              value={status?.progress.running ? "Live scan" : relativeTime(snapshot.completedAt)} />
           </div>
 
           <div className="px-4 py-2 border-b border-overlay-6 flex gap-2 overflow-x-auto">
@@ -219,43 +232,70 @@ export function StorageApp() {
 
           <div className="storage-main flex-1 min-h-0 grid">
             <section className="storage-map-panel flex flex-col border-r border-overlay-6">
-              <div className="h-10 px-3 border-b border-overlay-6 flex items-center gap-1 overflow-x-auto">
-                {breadcrumbs.map((node, index) => (
-                  <span key={node.id} className="flex items-center gap-1">
-                    {index > 0 && <i className="ph-bold ph-caret-right text-[10px] text-text-disabled" />}
-                    <button className="text-xs text-text-muted hover:text-primary whitespace-nowrap"
-                      onClick={() => { setFocusId(node.id); setSelectedId(node.id) }}>{node.name}</button>
-                  </span>
-                ))}
+              <div className="storage-navigation border-b border-overlay-6">
+                <div className="storage-navigation-actions">
+                  <button className="storage-icon-button" aria-label="Storage root" disabled={!parent}
+                    onClick={goHome} title="Storage root">
+                    <i className="ph-bold ph-house" />
+                  </button>
+                  <button className="storage-icon-button" aria-label="Up one level" disabled={!parent}
+                    onClick={goUp} title="Up one level">
+                    <i className="ph-bold ph-arrow-up" />
+                  </button>
+                </div>
+                <div className="storage-breadcrumbs">
+                  {breadcrumbs.map((node, index) => (
+                    <span key={node.id} className="flex items-center gap-1">
+                      {index > 0 && <i className="ph-bold ph-caret-right text-[10px] text-text-disabled" />}
+                      <button className={index === breadcrumbs.length - 1
+                        ? "storage-breadcrumb storage-breadcrumb-current"
+                        : "storage-breadcrumb"}
+                        onClick={() => { setFocusId(node.id); setSelectedId(node.id) }}>{node.name}</button>
+                    </span>
+                  ))}
+                </div>
+                <span className="storage-layer-badge">Layer {Math.max(1, breadcrumbs.length)}</span>
               </div>
               <div className="storage-treemap relative flex-1 min-h-0 m-3 rounded-xl overflow-hidden border border-overlay-8">
-                {tiles.length === 0 ? (
-                  <div className="absolute inset-0 flex items-center justify-center text-sm text-text-muted">
-                    This branch has no visible children.
-                  </div>
-                ) : tiles.map(tile => (
-                  <button key={tile.node.id}
-                    className="storage-tile text-left p-2"
-                    data-selected={tile.node.id === selected?.id}
-                    style={{
-                      left: `${tile.x}%`, top: `${tile.y}%`,
-                      width: `${tile.width}%`, height: `${tile.height}%`,
-                      background: colorFor(tile.node.origin, tile.node.kind === "aggregate"),
-                    }}
-                    title={`${tile.node.logicalPath}\n${formatBytes(tile.node.sizeBytes)}`}
-                    onClick={() => setSelectedId(tile.node.id)}
-                    onDoubleClick={() => openNode(tile.node)}>
-                    {tile.width * tile.height > 55 && (
-                      <span className="storage-tile-label block min-w-0">
-                        <strong className="block text-xs truncate text-white">{tile.node.name}</strong>
-                        <small className="block text-[10px] text-white/75 tabular-nums">{formatBytes(tile.node.sizeBytes)}</small>
-                      </span>
-                    )}
-                  </button>
-                ))}
+                <div key={focus?.id} className="storage-map-stage absolute inset-0">
+                  {tiles.length === 0 ? (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-text-muted">
+                      This branch has no visible children.
+                    </div>
+                  ) : tiles.map(tile => (
+                    <button key={tile.node.id}
+                      className="storage-tile text-left p-2"
+                      data-selected={tile.node.id === selected?.id}
+                      data-expandable={tile.node.children.length > 0}
+                      style={{
+                        left: `${tile.x}%`, top: `${tile.y}%`,
+                        width: `${tile.width}%`, height: `${tile.height}%`,
+                        background: colorFor(tile.node.origin, tile.node.kind === "aggregate"),
+                      }}
+                      title={`${tile.node.logicalPath}\n${formatBytes(tile.node.sizeBytes)}`}
+                      onClick={() => {
+                        if (tile.node.id === selected?.id && tile.node.children.length > 0) openNode(tile.node)
+                        else setSelectedId(tile.node.id)
+                      }}
+                      onDoubleClick={() => openNode(tile.node)}
+                      onKeyDown={event => {
+                        if (event.key === "Enter" && tile.node.children.length > 0) openNode(tile.node)
+                      }}>
+                      {tile.width * tile.height > 55 && (
+                        <span className="storage-tile-label block min-w-0">
+                          <strong className="flex items-center gap-1 text-xs text-white">
+                            <span className="truncate">{tile.node.name}</span>
+                            {tile.node.children.length > 0 && <i className="ph-bold ph-magnifying-glass-plus shrink-0" />}
+                          </strong>
+                          <small className="block text-[10px] text-white/75 tabular-nums">{formatBytes(tile.node.sizeBytes)}</small>
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="px-4 pb-3 flex items-center justify-between text-[11px] text-text-disabled">
-                <span>Single click inspects. Double click dives into a directory.</span>
+                <span>Click to inspect. Click the selected tile again, double-click, or press Enter to open it.</span>
                 {area?.logicalOnly && <span>L: is logical usage already backed by RedLeaf's database.</span>}
               </div>
             </section>
@@ -288,7 +328,7 @@ export function StorageApp() {
                     )}
                     {selected.truncated && (
                       <p className="storage-note"><i className="ph-bold ph-stack" />
-                        Smaller children are folded into an aggregate to keep this scan bounded.</p>
+                        Smaller children are grouped to keep the overview fast. Open the group to inspect its next layer.</p>
                     )}
                     {selected.children.length > 0 && selected.id !== focus?.id && (
                       <button className="storage-button storage-button-muted w-full justify-center"
@@ -303,7 +343,7 @@ export function StorageApp() {
                           Removal moves this item into RedLeaf quarantine first. It can be restored until you purge it.
                         </p>
                         <button className="storage-button storage-button-danger w-full justify-center mt-3"
-                          disabled={working} onClick={() => void requestCleanup()}>
+                          disabled={working || status?.progress.running} onClick={() => void requestCleanup()}>
                           <i className="ph-bold ph-archive" /> Move to quarantine
                         </button>
                       </div>
@@ -318,10 +358,11 @@ export function StorageApp() {
                       <div className="space-y-1">
                         {selected.children.slice(0, 12).map(child => (
                           <button key={child.id} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-overlay-6 text-xs"
-                            onClick={() => setSelectedId(child.id)}>
+                            onClick={() => openNode(child)}>
                             <i className={child.kind === "file" ? "ph-bold ph-file" : "ph-bold ph-folder"} />
                             <span className="truncate flex-1 text-left">{child.name}</span>
                             <span className="tabular-nums text-text-muted">{formatBytes(child.sizeBytes)}</span>
+                            {child.children.length > 0 && <i className="ph-bold ph-caret-right text-text-disabled" />}
                           </button>
                         ))}
                       </div>

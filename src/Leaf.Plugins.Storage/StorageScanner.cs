@@ -1,17 +1,23 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 
 namespace Leaf.Plugins.Storage;
 
-internal sealed class StorageScanner(Action<string, long, long, long> report)
+internal sealed class StorageScanner(
+    Action<string, long, long, long> report,
+    Action<StorageAreaSnapshot>? publishPartial = null)
 {
     private const int MaxChildren = 64;
     private const int MaxVisibleDepth = 4;
+    private static readonly TimeSpan PartialPublishInterval = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan ActiveSafetyWindow = TimeSpan.FromMinutes(30);
     private readonly Action<string, long, long, long> _report = report;
+    private readonly Action<StorageAreaSnapshot>? _publishPartial = publishPartial;
     private long _bytes;
     private long _files;
     private long _directories;
+    private long _lastPartialTimestamp;
 
     public StorageAreaSnapshot Scan(ScanArea area, CancellationToken ct)
     {
@@ -21,7 +27,8 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             if (area.Workspaces is { Count: > 0 })
                 root = ScanWorkspaces(area, ct);
             else if (area.RootPath is { } rootPath && Directory.Exists(rootPath))
-                root = ScanDirectory(area, rootPath, area.Name, area.RootLabel, 0, ct);
+                root = ScanDirectory(area, rootPath, area.Name, area.RootLabel, 0, ct,
+                    partial => PublishArea(area, partial));
             else
                 throw new DirectoryNotFoundException(area.RootPath ?? area.RootLabel);
 
@@ -43,18 +50,26 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
 
     private StorageNode ScanWorkspaces(ScanArea area, CancellationToken ct)
     {
-        var accumulator = new NodeAccumulator(MaxChildren);
+        var accumulator = new NodeAccumulator(MaxChildren, 12);
         foreach (var workspace in area.Workspaces!)
         {
             ct.ThrowIfCancellationRequested();
             if (!Directory.Exists(workspace.Path)) continue;
             var node = ScanDirectory(area, workspace.Path, workspace.AgentName,
                 CombineLogical(area.RootLabel, workspace.AgentName), 1, ct,
+                partial => PublishArea(area, BuildWorkspaceRoot(area, accumulator, partial)),
                 forcedOrigin: workspace.AgentName, forcedPurpose: "Agent workspace");
             accumulator.Add(node);
+            PublishArea(area, BuildWorkspaceRoot(area, accumulator));
         }
 
-        var children = accumulator.Complete(area.Id, area.RootLabel);
+        return BuildWorkspaceRoot(area, accumulator);
+    }
+
+    private static StorageNode BuildWorkspaceRoot(ScanArea area, NodeAccumulator accumulator,
+        StorageNode? current = null)
+    {
+        var children = accumulator.Complete(area.Id, area.RootLabel, current);
         return new StorageNode
         {
             Id = NodeId(area.Id, ""),
@@ -65,11 +80,11 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             Purpose = "Entity-backed Agent workspaces",
             CleanupKind = "protected",
             ProtectionReason = "Workspace files are durable entity data. Remove them through the owning Agent or editor.",
-            SizeBytes = accumulator.SizeBytes,
-            FileCount = accumulator.FileCount,
-            DirectoryCount = accumulator.DirectoryCount,
-            ModifiedAt = accumulator.ModifiedAt,
-            Truncated = accumulator.Truncated,
+            SizeBytes = accumulator.SizeBytes + (current?.SizeBytes ?? 0),
+            FileCount = accumulator.FileCount + (current?.FileCount ?? 0),
+            DirectoryCount = accumulator.DirectoryCount + (current?.DirectoryCount ?? 0),
+            ModifiedAt = Max(accumulator.ModifiedAt, current?.ModifiedAt),
+            Truncated = accumulator.Truncated || current?.Truncated == true,
             Children = children,
         };
     }
@@ -81,6 +96,7 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
         string logicalPath,
         int depth,
         CancellationToken ct,
+        Action<StorageNode>? publish = null,
         string? forcedOrigin = null,
         string? forcedPurpose = null)
     {
@@ -92,7 +108,9 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
         // browser snapshot is deliberately shallow. Retaining even a bounded set at
         // every directory can still produce hundreds of thousands of JSON nodes on
         // package caches and PostgreSQL data directories.
-        var accumulator = new NodeAccumulator(depth >= MaxVisibleDepth ? 0 : MaxChildren);
+        var accumulator = new NodeAccumulator(
+            depth >= MaxVisibleDepth ? 0 : MaxChildren,
+            depth >= MaxVisibleDepth ? MaxChildren : 12);
         string? error = null;
         IEnumerable<string> entries;
         try { entries = Directory.EnumerateFileSystemEntries(path); }
@@ -122,8 +140,13 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
                 if (attributes.HasFlag(FileAttributes.Directory))
                 {
                     var child = ScanDirectory(area, entry, childName, childLogical, depth + 1, ct,
+                        partial => publish?.Invoke(BuildDirectoryNode(area, path, name, logicalPath,
+                            depth, accumulator, error, partial, forcedOrigin, forcedPurpose)),
                         forcedOrigin, forcedPurpose);
                     accumulator.Add(child);
+                    if (depth <= 1 || ShouldPublishPartial())
+                        publish?.Invoke(BuildDirectoryNode(area, path, name, logicalPath,
+                            depth, accumulator, error, null, forcedOrigin, forcedPurpose));
                 }
                 else
                 {
@@ -136,7 +159,13 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
                         accumulator.AddFile(() => BuildFileNode(area, entry, childName, childLogical,
                             depth + 1, length, file.LastWriteTimeUtc, forcedOrigin, forcedPurpose),
                             length, file.LastWriteTimeUtc);
-                        if ((_files & 0x3ff) == 0) Report(area.Name);
+                        if ((_files & 0x3ff) == 0)
+                        {
+                            Report(area.Name);
+                            if (ShouldPublishPartial())
+                                publish?.Invoke(BuildDirectoryNode(area, path, name, logicalPath,
+                                    depth, accumulator, error, null, forcedOrigin, forcedPurpose));
+                        }
                     }
                     catch { /* files can disappear while the scan is running */ }
                 }
@@ -147,13 +176,29 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             error ??= ex.Message;
         }
 
+        return BuildDirectoryNode(area, path, name, logicalPath, depth, accumulator, error,
+            null, forcedOrigin, forcedPurpose);
+    }
+
+    private static StorageNode BuildDirectoryNode(
+        ScanArea area,
+        string path,
+        string name,
+        string logicalPath,
+        int depth,
+        NodeAccumulator accumulator,
+        string? error,
+        StorageNode? current,
+        string? forcedOrigin,
+        string? forcedPurpose)
+    {
         var modified = TryModified(path);
         var policy = Policy(area, path, depth, isDirectory: true, modified,
             forcedOrigin, forcedPurpose);
         if (error is not null)
             policy = (policy.Origin, policy.Purpose, "protected",
                 "The scan could not read this directory completely: " + error);
-        var children = accumulator.Complete(area.Id, logicalPath);
+        var children = accumulator.Complete(area.Id, logicalPath, current);
         return new StorageNode
         {
             Id = NodeId(area.Id, logicalPath),
@@ -164,11 +209,11 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             Purpose = policy.Purpose,
             CleanupKind = policy.CleanupKind,
             ProtectionReason = policy.ProtectionReason,
-            SizeBytes = accumulator.SizeBytes,
-            FileCount = accumulator.FileCount,
-            DirectoryCount = accumulator.DirectoryCount + 1,
-            ModifiedAt = Max(modified, accumulator.ModifiedAt),
-            Truncated = accumulator.Truncated,
+            SizeBytes = accumulator.SizeBytes + (current?.SizeBytes ?? 0),
+            FileCount = accumulator.FileCount + (current?.FileCount ?? 0),
+            DirectoryCount = accumulator.DirectoryCount + (current?.DirectoryCount ?? 0) + 1,
+            ModifiedAt = Max(modified, Max(accumulator.ModifiedAt, current?.ModifiedAt)),
+            Truncated = accumulator.Truncated || current?.Truncated == true,
             Children = children,
             PhysicalPath = path,
             AllowedRoot = area.RootPath,
@@ -260,6 +305,26 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
     private void Report(string area) => _report(area,
         Interlocked.Read(ref _bytes), Interlocked.Read(ref _files), Interlocked.Read(ref _directories));
 
+    private void PublishArea(ScanArea area, StorageNode root)
+    {
+        if (_publishPartial is null) return;
+        var (total, free) = area.LogicalOnly || area.RootPath is null
+            ? ((long?)null, (long?)null)
+            : VolumeSpace(area.RootPath);
+        _publishPartial(new StorageAreaSnapshot(area.Id, area.Name, area.RootLabel, area.Kind,
+            area.LogicalOnly, total, free, root, null));
+    }
+
+    private bool ShouldPublishPartial()
+    {
+        var now = Stopwatch.GetTimestamp();
+        var previous = Interlocked.Read(ref _lastPartialTimestamp);
+        if (previous != 0 && Stopwatch.GetElapsedTime(previous, now) < PartialPublishInterval)
+            return false;
+        Interlocked.Exchange(ref _lastPartialTimestamp, now);
+        return true;
+    }
+
     private static DateTimeOffset? TryModified(string path)
     {
         try { return Directory.GetLastWriteTimeUtc(path); }
@@ -302,9 +367,10 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
         ProtectionReason = reason,
     };
 
-    private sealed class NodeAccumulator(int capacity)
+    private sealed class NodeAccumulator(int capacity, int aggregateCapacity)
     {
         private readonly PriorityQueue<StorageNode, long> _largest = new();
+        private readonly PriorityQueue<StorageNode, long> _aggregateLargest = new();
         private long _otherBytes;
         private long _otherFiles;
         private long _otherDirectories;
@@ -345,9 +411,7 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             Accumulate(size, 1, 0, modified);
             if (capacity <= 0)
             {
-                _otherBytes += size;
-                _otherFiles++;
-                _otherModified = Max(_otherModified, modified);
+                DropFile(factory, size, modified);
                 return;
             }
             if (_largest.Count >= capacity)
@@ -355,9 +419,7 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
                 _largest.TryPeek(out _, out var smallest);
                 if (size <= smallest)
                 {
-                    _otherBytes += size;
-                    _otherFiles++;
-                    _otherModified = Max(_otherModified, modified);
+                    DropFile(factory, size, modified);
                     return;
                 }
                 var removed = _largest.Dequeue();
@@ -367,14 +429,63 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             _largest.Enqueue(node, node.SizeBytes);
         }
 
-        public IReadOnlyList<StorageNode> Complete(string area, string logicalPath)
+        private void DropFile(Func<StorageNode> factory, long size, DateTimeOffset modified)
+        {
+            _otherBytes += size;
+            _otherFiles++;
+            _otherModified = Max(_otherModified, modified);
+            if (aggregateCapacity <= 0) return;
+            if (_aggregateLargest.Count >= aggregateCapacity)
+            {
+                _aggregateLargest.TryPeek(out _, out var smallest);
+                if (size <= smallest) return;
+            }
+            RememberAggregateRepresentative(factory());
+        }
+
+        public IReadOnlyList<StorageNode> Complete(string area, string logicalPath,
+            StorageNode? current = null)
         {
             var items = _largest.UnorderedItems.Select(item => item.Element)
                 .OrderByDescending(node => node.SizeBytes)
                 .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+            if (current is not null) items.Add(current);
+            items = items.OrderByDescending(node => node.SizeBytes)
+                .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
             if (Truncated)
             {
+                var aggregateChildren = _aggregateLargest.UnorderedItems
+                    .Select(item => item.Element)
+                    .OrderByDescending(node => node.SizeBytes)
+                    .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var representedBytes = aggregateChildren.Sum(node => node.SizeBytes);
+                var representedFiles = aggregateChildren.Sum(node => node.FileCount);
+                var representedDirectories = aggregateChildren.Sum(node => node.DirectoryCount);
+                var remainderBytes = Math.Max(0, _otherBytes - representedBytes);
+                var remainderFiles = Math.Max(0, _otherFiles - representedFiles);
+                var remainderDirectories = Math.Max(0, _otherDirectories - representedDirectories);
+                if (remainderFiles > 0 || remainderDirectories > 0)
+                {
+                    aggregateChildren.Add(new StorageNode
+                    {
+                        Id = NodeId(area, logicalPath + "\\__other\\__remainder"),
+                        Name = "More small items",
+                        LogicalPath = CombineLogical(logicalPath, "More small items"),
+                        Kind = "aggregate",
+                        Origin = "Mixed",
+                        Purpose = "Remaining smaller items",
+                        CleanupKind = "protected",
+                        ProtectionReason = "This is the remainder of a bounded summary.",
+                        SizeBytes = remainderBytes,
+                        FileCount = remainderFiles,
+                        DirectoryCount = remainderDirectories,
+                        ModifiedAt = _otherModified,
+                        Truncated = true,
+                    });
+                }
                 items.Add(new StorageNode
                 {
                     Id = NodeId(area, logicalPath + "\\__other"),
@@ -390,6 +501,7 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
                     DirectoryCount = _otherDirectories,
                     ModifiedAt = _otherModified,
                     Truncated = true,
+                    Children = aggregateChildren,
                 });
             }
             return items;
@@ -409,6 +521,40 @@ internal sealed class StorageScanner(Action<string, long, long, long> report)
             _otherFiles += node.FileCount;
             _otherDirectories += node.DirectoryCount;
             _otherModified = Max(_otherModified, node.ModifiedAt);
+            RememberAggregateRepresentative(Shallow(node));
         }
+
+        private void RememberAggregateRepresentative(StorageNode node)
+        {
+            if (aggregateCapacity <= 0) return;
+            if (_aggregateLargest.Count < aggregateCapacity)
+            {
+                _aggregateLargest.Enqueue(node, node.SizeBytes);
+                return;
+            }
+            _aggregateLargest.TryPeek(out _, out var smallest);
+            if (node.SizeBytes <= smallest) return;
+            _aggregateLargest.Dequeue();
+            _aggregateLargest.Enqueue(node, node.SizeBytes);
+        }
+
+        private static StorageNode Shallow(StorageNode node) => new()
+        {
+            Id = node.Id,
+            Name = node.Name,
+            LogicalPath = node.LogicalPath,
+            Kind = node.Kind,
+            Origin = node.Origin,
+            Purpose = node.Purpose,
+            CleanupKind = node.CleanupKind,
+            ProtectionReason = node.ProtectionReason,
+            SizeBytes = node.SizeBytes,
+            FileCount = node.FileCount,
+            DirectoryCount = node.DirectoryCount,
+            ModifiedAt = node.ModifiedAt,
+            Truncated = node.Truncated || node.Children.Count > 0,
+            PhysicalPath = node.PhysicalPath,
+            AllowedRoot = node.AllowedRoot,
+        };
     }
 }

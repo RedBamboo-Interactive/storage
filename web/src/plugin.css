@@ -26,6 +26,60 @@
   min-height: 26rem;
 }
 
+.storage-navigation {
+  min-height: 2.75rem;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: .5rem;
+  padding: .35rem .65rem;
+}
+
+.storage-navigation-actions {
+  display: flex;
+  align-items: center;
+  gap: .15rem;
+}
+
+.storage-navigation-actions .storage-icon-button:disabled {
+  opacity: .3;
+  cursor: default;
+}
+
+.storage-breadcrumbs {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: .2rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.storage-breadcrumbs::-webkit-scrollbar { display: none; }
+
+.storage-breadcrumb {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border-radius: .35rem;
+  padding: .25rem .35rem;
+  color: var(--text-muted);
+  font-size: .72rem;
+}
+
+.storage-breadcrumb:hover { color: var(--primary); background: rgb(from var(--contrast) r g b / .05); }
+.storage-breadcrumb-current { color: var(--contrast); font-weight: 600; }
+
+.storage-layer-badge {
+  border-radius: 999px;
+  background: rgb(from var(--contrast) r g b / .06);
+  padding: .2rem .45rem;
+  color: var(--text-disabled);
+  font-size: .62rem;
+  white-space: nowrap;
+}
+
 @media (min-width: 64rem) {
   .storage-metrics {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -48,7 +102,15 @@
   border: 1px solid rgb(255 255 255 / .13);
   transition: filter 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
+.storage-map-stage {
+  animation: storage-focus-in 150ms ease-out;
+}
+@keyframes storage-focus-in {
+  from { opacity: .35; transform: scale(.985); }
+  to { opacity: 1; transform: scale(1); }
+}
 .storage-tile:hover { filter: brightness(1.18); z-index: 2; }
+.storage-tile[data-expandable="true"] { cursor: zoom-in; }
 .storage-tile[data-selected="true"] {
   border-color: var(--primary);
   box-shadow: inset 0 0 0 1px var(--primary), 0 0 0 1px rgb(from var(--primary) r g b / .3);
@@ -84,6 +146,11 @@
   color: var(--text-muted);
 }
 .storage-icon-button:hover { background: rgb(from var(--contrast) r g b / .08); color: var(--contrast); }
+
+@media (prefers-reduced-motion: reduce) {
+  .storage-map-stage { animation: none; }
+  .storage-tile { transition: none; }
+}
 .storage-area-chip {
   display: inline-flex;
   align-items: center;

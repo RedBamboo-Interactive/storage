@@ -69,6 +69,8 @@ public sealed class StorageService
         StorageSnapshot snapshot;
         lock (_gate)
         {
+            if (_progress.Running)
+                throw new StorageConflictException("Wait for the storage scan to finish before cleaning up.");
             snapshot = _snapshot ?? throw new StorageConflictException(
                 "Run a storage scan before cleaning up.");
             if (snapshotId is not null && snapshot.Id != snapshotId)
@@ -202,6 +204,7 @@ public sealed class StorageService
     {
         try
         {
+            var areas = new List<StorageAreaSnapshot>();
             var scanner = new StorageScanner((area, bytes, files, directories) =>
             {
                 lock (_gate)
@@ -215,8 +218,13 @@ public sealed class StorageService
                             DirectoriesVisited = directories,
                         };
                 }
-            });
-            var areas = specs.Select(spec => scanner.Scan(spec, ct)).ToList();
+            }, partial => PublishProgressSnapshot(scanId, started, areas, partial));
+            foreach (var spec in specs)
+            {
+                var area = scanner.Scan(spec, ct);
+                areas.Add(area);
+                PublishProgressSnapshot(scanId, started, areas, null);
+            }
             var snapshot = new StorageSnapshot(scanId, started, DateTimeOffset.UtcNow,
                 areas.Where(area => !area.LogicalOnly).Sum(area => area.Root.SizeBytes),
                 areas.Where(area => area.LogicalOnly).Sum(area => area.Root.SizeBytes),
@@ -244,6 +252,28 @@ public sealed class StorageService
             lock (_gate)
                 if (_progress.ScanId == scanId)
                     _progress = _progress with { Running = false, Error = ex.Message };
+        }
+    }
+
+    private void PublishProgressSnapshot(string scanId, DateTimeOffset started,
+        IReadOnlyList<StorageAreaSnapshot> completed, StorageAreaSnapshot? partial)
+    {
+        var areas = completed.ToList();
+        if (partial is not null)
+        {
+            var existing = areas.FindIndex(area => area.Id == partial.Id);
+            if (existing >= 0) areas[existing] = partial;
+            else areas.Add(partial);
+        }
+        if (areas.Count == 0) return;
+        var snapshot = new StorageSnapshot(scanId, started, DateTimeOffset.UtcNow,
+            areas.Where(area => !area.LogicalOnly).Sum(area => area.Root.SizeBytes),
+            areas.Where(area => area.LogicalOnly).Sum(area => area.Root.SizeBytes),
+            areas);
+        lock (_gate)
+        {
+            if (_progress.ScanId == scanId && _progress.Running)
+                _snapshot = snapshot;
         }
     }
 

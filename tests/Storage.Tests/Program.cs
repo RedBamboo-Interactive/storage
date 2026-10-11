@@ -19,7 +19,8 @@ try
     for (var index = 0; index < 140; index++)
         await File.WriteAllBytesAsync(Path.Combine(root, $"tiny-{index:D3}.bin"), new byte[index + 1]);
 
-    var scanner = new StorageScanner((_, _, _, _) => { });
+    var partials = new List<StorageAreaSnapshot>();
+    var scanner = new StorageScanner((_, _, _, _) => { }, partials.Add);
     var area = scanner.Scan(new ScanArea("scratch", "Scratch", @"S:\", "physical", false,
         root, AgentNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Nova" }),
         CancellationToken.None);
@@ -31,7 +32,11 @@ try
     Assert(novaNode.CleanupKind == "protected", "agent root stays protected");
     Assert(novaNode.Children.Single(node => node.Name == "abc123").CleanupKind == "quarantine",
         "marked inactive execution is quarantinable");
-    Assert(area.Root.Children.Any(node => node.Kind == "aggregate"), "large sibling sets are bounded");
+    var aggregate = area.Root.Children.Single(node => node.Kind == "aggregate");
+    Assert(aggregate.Children.Count > 0, "bounded sibling groups expose a representative layer");
+    Assert(partials.Count > 0, "scan publishes a partial tree before completion");
+    Assert(partials.Any(partial => partial.Root.SizeBytes > 0),
+        "partial tree carries measured bytes");
 
     var deep = Path.Combine(execution, "one", "two", "three", "four", "five");
     Directory.CreateDirectory(deep);
@@ -41,10 +46,13 @@ try
         CancellationToken.None);
     var boundedExecution = bounded.Root.Children.Single(node => node.Name == "Nova")
         .Children.Single(node => node.Name == "abc123");
-    Assert(MaxDepth(boundedExecution) <= 3, "visual descendants have a fixed depth bound");
+    Assert(MaxDepth(boundedExecution) <= 4,
+        "visual descendants keep a fixed bound including aggregate representatives");
     Assert(boundedExecution.SizeBytes >= 4096 + 8192, "depth compaction preserves exact totals");
     Assert(Flatten(boundedExecution).Any(node => node.Kind == "aggregate"),
         "depth compaction emits a protected aggregate");
+    Assert(Flatten(boundedExecution).Any(node => node.Kind == "aggregate" && node.Children.Count > 0),
+        "depth aggregate exposes its largest next-layer entries");
 
     StorageService.EnsureBelow(root, loose);
     var escaped = false;

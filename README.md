@@ -2,7 +2,7 @@
 
 Storage is RedLeaf's visual disk-usage extension. It scans the physical `S:`
 scratch area, logical `L:` Agent workspaces, and RedLeaf application data,
-then renders the largest branches as a zoomable treemap.
+then renders the largest branches as a progressively updating, zoomable treemap.
 
 The distinction between physical and logical usage is deliberate: `L:` is an
 entity-backed projection whose bytes already live in RedLeaf's database. The
@@ -12,8 +12,11 @@ use.
 ## Safety contract
 
 - Every route requires an authenticated installation administrator.
-- Scans skip reparse points, tolerate inaccessible and changing files, and keep
-  only the largest 120 children per directory in memory.
+- Scans skip reparse points, tolerate inaccessible and changing files, and publish
+  measured branches while traversal is still running.
+- Each directory keeps the largest 64 children in the main layer. Bounded
+  `Other items` groups expose representative children instead of becoming a
+  dead-end square.
 - Application data and Agent workspaces are read-only.
 - Agent root folders are protected. Only inactive marked execution directories
   and inactive loose items directly under scratch can be selected for cleanup.
@@ -30,7 +33,7 @@ All routes are under `/api/apps/storage`.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/status` | Current scan progress and latest snapshot |
+| GET | `/status` | Current scan progress and latest progressively updated snapshot |
 | POST | `/scan` | Start one background scan |
 | POST | `/cleanup/preview` | Revalidate a selected node and mint a two-minute token |
 | POST | `/cleanup/quarantine` | Consume the token and move the item |

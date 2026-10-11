@@ -37,6 +37,18 @@ test("Storage owns its responsive shell layout", async () => {
   assert.match(css, /grid-template-columns: minmax\(0, 1fr\) 20rem/)
 })
 
+test("scan progress drives the live tree and navigation is explicit", async () => {
+  const app = await readFile(new URL("web/src/App.tsx", root), "utf8")
+  const css = await readFile(new URL("web/src/plugin.css", root), "utf8")
+  assert.match(app, /window\.setInterval\(\(\) => \{ void loadStatus\(\) \}, 1000\)/)
+  assert.match(app, /Live scan/)
+  assert.match(app, /aria-label="Storage root"/)
+  assert.match(app, /aria-label="Up one level"/)
+  assert.match(app, /Layer \{Math\.max\(1, breadcrumbs\.length\)\}/)
+  assert.match(app, /Click the selected tile again/)
+  assert.match(css, /storage-focus-in/)
+})
+
 test("treemap always terminates for an exact half split", () => {
   const node = (id) => ({ id, sizeBytes: 10 })
   const tiles = layoutTreemap([node("left"), node("right")])
