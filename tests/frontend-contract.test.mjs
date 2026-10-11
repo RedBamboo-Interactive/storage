@@ -51,12 +51,15 @@ test("scan progress drives the live tree and navigation is explicit", async () =
 
 test("aggregates browse concrete pages and selected items have advisory analysis", async () => {
   const app = await readFile(new URL("web/src/App.tsx", root), "utf8")
+  const plugin = await readFile(new URL("src/Leaf.Plugins.Storage/Plugin.cs", root), "utf8")
   const css = await readFile(new URL("web/src/plugin.css", root), "utf8")
   assert.match(app, /\/api\/apps\/storage\/browse/)
   assert.match(app, /aria-label="Previous items"/)
   assert.match(app, /aria-label="Analyze selected item"/)
   assert.match(app, /\/api\/apps\/storage\/analyze/)
   assert.match(app, /Advisory only\. No files changed/)
+  assert.match(plugin, /StorageService storage, IComputeJobs compute/)
+  assert.doesNotMatch(plugin, /FromKeyedServices\(PluginId\)\]\s*IComputeJobs/)
   assert.doesNotMatch(css, /max-height:\s*52rem/)
   assert.match(css, /height:\s*100dvh/)
 })

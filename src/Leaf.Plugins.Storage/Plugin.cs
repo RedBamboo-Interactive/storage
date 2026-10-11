@@ -76,7 +76,7 @@ public sealed class StoragePlugin : ILeafPlugin
                 storage.Browse(request.NodeId, request.SnapshotId, request.Offset))));
 
         group.MapPost("/analyze", async (AnalyzeRequest request, HttpContext ctx,
-            StorageService storage, [FromKeyedServices(PluginId)] IComputeJobs compute,
+            StorageService storage, IComputeJobs compute,
             CancellationToken ct) => await GuardAsync(ctx, async () =>
         {
             var evidence = storage.PrepareAnalysis(request.NodeId, request.SnapshotId);

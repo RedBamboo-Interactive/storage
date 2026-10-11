@@ -105,6 +105,7 @@ release URL + sha256 to a registry index. Users install it from `/extensions`
 - Never ship `Leaf.Sdk.dll` / `RedBamboo.AppHost.dll` inside the package — it
   breaks plugin type identity; the installer refuses such packages
   (`build-leafpkg.ps1` strips them automatically).
-- Kernel services in endpoint handlers need
-  `[FromKeyedServices(StoragePlugin.PluginId)]` — a plain parameter fails at
-  kernel startup, not at build time.
+- Plugin-scoped services such as `IEntityStore` use
+  `[FromKeyedServices(StoragePlugin.PluginId)]`. Shared kernel services such as
+  `IComputeJobs` are resolved normally; requesting a keyed compute service fails
+  endpoint activation at runtime.
