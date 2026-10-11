@@ -13,7 +13,9 @@ use.
 
 - Every route requires an authenticated installation administrator.
 - Scans skip reparse points, tolerate inaccessible and changing files, and publish
-  measured branches while traversal is still running.
+  measured branches while traversal is still running. Live snapshots stay at two
+  visible layers so one-second progress refreshes do not repeatedly serialize the
+  full finished tree.
 - Each directory keeps the largest 64 children in the main layer. Bounded
   `Other items` groups expose representative children instead of becoming a
   dead-end square.

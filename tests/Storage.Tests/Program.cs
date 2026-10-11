@@ -37,6 +37,8 @@ try
     Assert(partials.Count > 0, "scan publishes a partial tree before completion");
     Assert(partials.Any(partial => partial.Root.SizeBytes > 0),
         "partial tree carries measured bytes");
+    Assert(partials.All(partial => MaxDepth(partial.Root) <= 2),
+        "progressive snapshots stay compact while totals grow");
 
     var deep = Path.Combine(execution, "one", "two", "three", "four", "five");
     Directory.CreateDirectory(deep);

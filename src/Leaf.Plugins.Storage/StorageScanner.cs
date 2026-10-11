@@ -10,6 +10,9 @@ internal sealed class StorageScanner(
 {
     private const int MaxChildren = 64;
     private const int MaxVisibleDepth = 4;
+    private const int MaxAggregateChildren = 16;
+    private const int MaxProgressChildren = 24;
+    private const int MaxProgressDepth = 2;
     private static readonly TimeSpan PartialPublishInterval = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan ActiveSafetyWindow = TimeSpan.FromMinutes(30);
     private readonly Action<string, long, long, long> _report = report;
@@ -50,7 +53,7 @@ internal sealed class StorageScanner(
 
     private StorageNode ScanWorkspaces(ScanArea area, CancellationToken ct)
     {
-        var accumulator = new NodeAccumulator(MaxChildren, 12);
+        var accumulator = new NodeAccumulator(MaxChildren, 6);
         foreach (var workspace in area.Workspaces!)
         {
             ct.ThrowIfCancellationRequested();
@@ -110,7 +113,7 @@ internal sealed class StorageScanner(
         // package caches and PostgreSQL data directories.
         var accumulator = new NodeAccumulator(
             depth >= MaxVisibleDepth ? 0 : MaxChildren,
-            depth >= MaxVisibleDepth ? MaxChildren : 12);
+            depth >= MaxVisibleDepth ? MaxAggregateChildren : 6);
         string? error = null;
         IEnumerable<string> entries;
         try { entries = Directory.EnumerateFileSystemEntries(path); }
@@ -312,8 +315,66 @@ internal sealed class StorageScanner(
             ? ((long?)null, (long?)null)
             : VolumeSpace(area.RootPath);
         _publishPartial(new StorageAreaSnapshot(area.Id, area.Name, area.RootLabel, area.Kind,
-            area.LogicalOnly, total, free, root, null));
+            area.LogicalOnly, total, free, CompactForProgress(area.Id, root, 0), null));
     }
+
+    private static StorageNode CompactForProgress(string area, StorageNode node, int depth)
+    {
+        if (depth >= MaxProgressDepth || node.Children.Count == 0)
+            return CopyNode(node, [], node.Truncated || node.Children.Count > 0);
+
+        var ordered = node.Children.OrderByDescending(child => child.SizeBytes)
+            .ThenBy(child => child.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var children = ordered.Take(MaxProgressChildren)
+            .Select(child => CompactForProgress(area, child, depth + 1))
+            .ToList();
+        var omitted = ordered.Skip(MaxProgressChildren).ToList();
+        if (omitted.Count > 0)
+        {
+            children.Add(new StorageNode
+            {
+                Id = NodeId(area, node.LogicalPath + "\\__progress_other"),
+                Name = "Other items still scanning",
+                LogicalPath = CombineLogical(node.LogicalPath, "Other items still scanning"),
+                Kind = "aggregate",
+                Origin = "Mixed",
+                Purpose = "Bounded live scan summary",
+                CleanupKind = "protected",
+                ProtectionReason = "Wait for the scan to finish before cleaning up.",
+                SizeBytes = omitted.Sum(child => child.SizeBytes),
+                FileCount = omitted.Sum(child => child.FileCount),
+                DirectoryCount = omitted.Sum(child => child.DirectoryCount),
+                ModifiedAt = omitted.Select(child => child.ModifiedAt).Aggregate(Max),
+                Truncated = true,
+                Children = omitted.Take(8)
+                    .Select(child => CopyNode(child, [], child.Truncated || child.Children.Count > 0))
+                    .ToList(),
+            });
+        }
+        return CopyNode(node, children, node.Truncated || omitted.Count > 0);
+    }
+
+    private static StorageNode CopyNode(StorageNode node, IReadOnlyList<StorageNode> children,
+        bool truncated) => new()
+    {
+        Id = node.Id,
+        Name = node.Name,
+        LogicalPath = node.LogicalPath,
+        Kind = node.Kind,
+        Origin = node.Origin,
+        Purpose = node.Purpose,
+        CleanupKind = node.CleanupKind,
+        ProtectionReason = node.ProtectionReason,
+        SizeBytes = node.SizeBytes,
+        FileCount = node.FileCount,
+        DirectoryCount = node.DirectoryCount,
+        ModifiedAt = node.ModifiedAt,
+        Truncated = truncated,
+        Children = children,
+        PhysicalPath = node.PhysicalPath,
+        AllowedRoot = node.AllowedRoot,
+    };
 
     private bool ShouldPublishPartial()
     {
