@@ -17,6 +17,8 @@ public sealed class StorageNode
     public long DirectoryCount { get; init; }
     public DateTimeOffset? ModifiedAt { get; init; }
     public bool Truncated { get; init; }
+    public bool Browsable { get; init; }
+    public int BrowseOffset { get; init; }
     public IReadOnlyList<StorageNode> Children { get; init; } = [];
 
     [JsonIgnore]
@@ -78,6 +80,54 @@ public sealed record CleanupPreview(
     long FileCount,
     DateTimeOffset ExpiresAt,
     string Action);
+
+public sealed record BrowseRequest(string NodeId, string? SnapshotId, int? Offset = null);
+
+public sealed record StorageBrowsePage(
+    StorageNode Node,
+    int Offset,
+    int Limit,
+    int Total,
+    bool HasPrevious,
+    bool HasNext);
+
+public sealed record AnalyzeRequest(string NodeId, string? SnapshotId);
+
+public sealed record StorageAnalysis(
+    string Summary,
+    IReadOnlyList<string> Contents,
+    string DeletionImpact,
+    string Recommendation,
+    string Reasoning,
+    double Confidence,
+    string? Model,
+    bool ActionAuthority = false);
+
+internal sealed record StorageAnalysisEvidence(
+    string SnapshotId,
+    string NodeId,
+    string Name,
+    string LogicalPath,
+    string Kind,
+    string Origin,
+    string Purpose,
+    string CleanupKind,
+    string? ProtectionReason,
+    long SizeBytes,
+    long FileCount,
+    long DirectoryCount,
+    DateTimeOffset? ModifiedAt,
+    bool Aggregate,
+    IReadOnlyList<StorageEvidenceItem> RepresentativeItems,
+    IReadOnlyDictionary<string, long> Extensions);
+
+internal sealed record StorageEvidenceItem(
+    string Name,
+    string Kind,
+    long SizeBytes,
+    long FileCount,
+    long DirectoryCount,
+    DateTimeOffset? ModifiedAt);
 
 public sealed record QuarantineItem(
     string Id,

@@ -17,8 +17,11 @@ use.
   visible layers so one-second progress refreshes do not repeatedly serialize the
   full finished tree.
 - Each directory keeps the largest 64 children in the main layer. Bounded
-  `Other items` groups expose representative children instead of becoming a
-  dead-end square.
+  `Other items` groups load paged concrete files and folders on demand rather
+  than embedding another synthetic summary layer in every scan response.
+- Selected-item analysis sends bounded names, sizes, counts, timestamps and file
+  extensions to RedCompute's `standard` quality tier. It never reads file contents,
+  never changes files, and explicitly grants no action authority.
 - Application data and Agent workspaces are read-only.
 - Agent root folders are protected. Only inactive marked execution directories
   and inactive loose items directly under scratch can be selected for cleanup.
@@ -37,6 +40,8 @@ All routes are under `/api/apps/storage`.
 | --- | --- | --- |
 | GET | `/status` | Current scan progress and latest progressively updated snapshot |
 | POST | `/scan` | Start one background scan |
+| POST | `/browse` | Load one page of concrete children for a scanned directory or aggregate |
+| POST | `/analyze` | Produce an advisory selected-item summary and safe next-action recommendation |
 | POST | `/cleanup/preview` | Revalidate a selected node and mint a two-minute token |
 | POST | `/cleanup/quarantine` | Consume the token and move the item |
 | GET | `/quarantine` | List recoverable items |
@@ -84,8 +89,8 @@ corepack pnpm --dir web run build:pkg
 2. Extensions → **Add dev plugin** → this directory. The kernel registers it in
    `leaf.workspace.json` and loads it in place of any installed copy.
 3. Frontend loop: `pnpm dev` in `web/` (watch-build; reload the app to pick up
-   changes). Backend loop: `dotnet build`, then restart RedLeaf
-   (`POST /api/setup/restart` or the tray menu).
+   changes). Backend activation goes through RedLeaf's checked-in coordinated
+   rebuild script, for example `rebuild.ps1 -Only storage` from the kernel checkout.
 
 ## Publish
 

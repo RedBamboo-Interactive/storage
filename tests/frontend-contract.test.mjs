@@ -49,6 +49,18 @@ test("scan progress drives the live tree and navigation is explicit", async () =
   assert.match(css, /storage-focus-in/)
 })
 
+test("aggregates browse concrete pages and selected items have advisory analysis", async () => {
+  const app = await readFile(new URL("web/src/App.tsx", root), "utf8")
+  const css = await readFile(new URL("web/src/plugin.css", root), "utf8")
+  assert.match(app, /\/api\/apps\/storage\/browse/)
+  assert.match(app, /aria-label="Previous items"/)
+  assert.match(app, /aria-label="Analyze selected item"/)
+  assert.match(app, /\/api\/apps\/storage\/analyze/)
+  assert.match(app, /Advisory only\. No files changed/)
+  assert.doesNotMatch(css, /max-height:\s*52rem/)
+  assert.match(css, /height:\s*100dvh/)
+})
+
 test("treemap always terminates for an exact half split", () => {
   const node = (id) => ({ id, sizeBytes: 10 })
   const tiles = layoutTreemap([node("left"), node("right")])

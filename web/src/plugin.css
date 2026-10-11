@@ -12,6 +12,8 @@
 
 .storage-root {
   background: var(--color-surface-base, var(--background));
+  height: 100dvh;
+  overflow: hidden;
 }
 
 .storage-metrics {
@@ -87,9 +89,7 @@
 
   .storage-main {
     grid-template-columns: minmax(0, 1fr) 20rem;
-    min-height: 34rem;
-    height: calc(100dvh - 18rem);
-    max-height: 52rem;
+    min-height: 0;
   }
 
   .storage-map-panel {
@@ -146,6 +146,23 @@
   color: var(--text-muted);
 }
 .storage-icon-button:hover { background: rgb(from var(--contrast) r g b / .08); color: var(--contrast); }
+.storage-icon-button:disabled { opacity: .3; cursor: default; }
+.storage-analysis-card {
+  border: 1px solid rgb(from var(--primary) r g b / .25);
+  border-radius: .75rem;
+  background: rgb(from var(--primary) r g b / .07);
+  padding: .8rem;
+}
+.storage-analysis-card ul { list-style: disc; padding-left: 1rem; }
+.storage-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .55rem;
+  padding: 0 .75rem .55rem;
+  color: var(--text-muted);
+  font-size: .68rem;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .storage-map-stage { animation: none; }

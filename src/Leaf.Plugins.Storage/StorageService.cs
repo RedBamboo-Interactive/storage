@@ -11,8 +11,11 @@ public sealed class StorageService
     };
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, PendingCleanup> _pending = new();
-    private readonly string _leafRoot = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RedLeaf");
+    private readonly Dictionary<string, BrowseEntry> _browseNodes = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, StorageNode> _directoryIndex =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _completedAreas = new(StringComparer.Ordinal);
+    private readonly string _leafRoot;
     private readonly string _scratchRoot;
     private readonly string _quarantineRoot;
     private CancellationTokenSource? _scanCts;
@@ -20,7 +23,14 @@ public sealed class StorageService
     private StorageSnapshot? _snapshot;
 
     public StorageService()
+        : this(Path.Combine(Environment.GetFolderPath(
+            Environment.SpecialFolder.LocalApplicationData), "RedLeaf"))
     {
+    }
+
+    internal StorageService(string leafRoot)
+    {
+        _leafRoot = Path.GetFullPath(leafRoot);
         _scratchRoot = Path.Combine(_leafRoot, "Scratch");
         _quarantineRoot = Path.Combine(_leafRoot, "Storage", "Quarantine");
     }
@@ -42,6 +52,9 @@ public sealed class StorageService
             started = DateTimeOffset.UtcNow;
             _scanCts?.Dispose();
             _scanCts = new CancellationTokenSource();
+            _browseNodes.Clear();
+            _directoryIndex.Clear();
+            _completedAreas.Clear();
             _progress = new StorageProgress(true, scanId, started, "Preparing", 0, 0, 0, null);
         }
 
@@ -77,8 +90,12 @@ public sealed class StorageService
                 throw new StorageConflictException("The scan changed. Review the item again.");
         }
 
-        var node = FindNode(snapshot, nodeId)
-            ?? throw new KeyNotFoundException("The selected item is not present in the current scan.");
+        StorageNode? node;
+        lock (_gate)
+            node = FindNode(snapshot, nodeId)
+                ?? (_browseNodes.TryGetValue(nodeId, out var browsed) ? browsed.Node : null);
+        if (node is null)
+            throw new KeyNotFoundException("The selected item is not present in the current scan.");
         if (node.CleanupKind != "quarantine" || node.PhysicalPath is null || node.AllowedRoot is null)
             throw new StorageConflictException(node.ProtectionReason ?? "This item is protected.");
         EnsureBelow(node.AllowedRoot, node.PhysicalPath);
@@ -164,6 +181,135 @@ public sealed class StorageService
         return result.OrderByDescending(item => item.QuarantinedAt).ToList();
     }
 
+    public StorageBrowsePage Browse(string nodeId, string? snapshotId, int? requestedOffset = null)
+    {
+        const int limit = 96;
+        StorageSnapshot snapshot;
+        BrowseEntry entry;
+        Dictionary<string, StorageNode> directoryIndex;
+        lock (_gate)
+        {
+            snapshot = _snapshot ?? throw new StorageConflictException(
+                "Run a storage scan before browsing.");
+            if (snapshotId is not null && snapshot.Id != snapshotId)
+                throw new StorageConflictException("The scan changed. Open the item again.");
+            if (!_browseNodes.TryGetValue(nodeId, out entry!))
+            {
+                var area = snapshot.Areas.FirstOrDefault(candidate => FindNode(candidate.Root, nodeId) is not null)
+                    ?? throw new KeyNotFoundException("The selected item is not present in the current scan.");
+                entry = new BrowseEntry(area.Id, FindNode(area.Root, nodeId)!);
+            }
+            if (!_completedAreas.Contains(entry.AreaId))
+                throw new StorageConflictException("This storage layer is still scanning. Try again in a moment.");
+            directoryIndex = new Dictionary<string, StorageNode>(_directoryIndex,
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        var node = entry.Node;
+        if (!node.Browsable || node.PhysicalPath is null || node.AllowedRoot is null)
+            throw new StorageConflictException("This summary cannot be opened yet.");
+        EnsureBelowOrEqual(node.AllowedRoot, node.PhysicalPath);
+        if (!Directory.Exists(node.PhysicalPath))
+            throw new StorageConflictException("The selected directory no longer exists. Scan again.");
+        if (IsReparsePoint(node.PhysicalPath))
+            throw new StorageConflictException("Linked paths cannot be browsed.");
+
+        var children = new List<StorageNode>();
+        try
+        {
+            foreach (var path in Directory.EnumerateFileSystemEntries(node.PhysicalPath))
+            {
+                try
+                {
+                    if (entry.AreaId == "leaf-data"
+                        && Path.GetFullPath(node.PhysicalPath).TrimEnd(Path.DirectorySeparatorChar)
+                            .Equals(Path.GetFullPath(node.AllowedRoot).TrimEnd(Path.DirectorySeparatorChar),
+                                StringComparison.OrdinalIgnoreCase)
+                        && Path.GetFileName(path) is var rootName
+                        && (rootName.Equals("Scratch", StringComparison.OrdinalIgnoreCase)
+                            || rootName.Equals("Storage", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+                    var attributes = File.GetAttributes(path);
+                    if (attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                    if (attributes.HasFlag(FileAttributes.Directory))
+                    {
+                        if (directoryIndex.TryGetValue(Path.GetFullPath(path), out var indexed))
+                            children.Add(StorageScanner.Shallow(indexed));
+                        continue;
+                    }
+                    var file = new FileInfo(path);
+                    children.Add(BuildBrowsedFile(entry.AreaId, node, file));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Entries can disappear or become inaccessible between scan and browse.
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new StorageConflictException("Windows could not read this directory. Scan again if it changed.");
+        }
+
+        children = children.OrderByDescending(child => child.SizeBytes)
+            .ThenBy(child => child.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        var baseOffset = Math.Max(0, node.BrowseOffset);
+        var total = Math.Max(0, children.Count - baseOffset);
+        var offset = Math.Clamp(requestedOffset ?? 0, 0, Math.Max(0, total - 1));
+        if (total == 0) offset = 0;
+        var pageChildren = children.Skip(baseOffset + offset).Take(limit).ToList();
+        var pageNode = CopyForBrowse(node, pageChildren, total > pageChildren.Count);
+
+        lock (_gate)
+        {
+            _browseNodes[pageNode.Id] = new BrowseEntry(entry.AreaId, pageNode);
+            foreach (var child in pageChildren)
+                _browseNodes[child.Id] = new BrowseEntry(entry.AreaId, child);
+        }
+        return new StorageBrowsePage(pageNode, offset, limit, total,
+            offset > 0, offset + pageChildren.Count < total);
+    }
+
+    internal StorageAnalysisEvidence PrepareAnalysis(string nodeId, string? snapshotId)
+    {
+        StorageSnapshot snapshot;
+        BrowseEntry entry;
+        lock (_gate)
+        {
+            snapshot = _snapshot ?? throw new StorageConflictException(
+                "Run a storage scan before requesting analysis.");
+            if (snapshotId is not null && snapshot.Id != snapshotId)
+                throw new StorageConflictException("The scan changed. Select the item again.");
+            if (!_browseNodes.TryGetValue(nodeId, out entry!))
+            {
+                var area = snapshot.Areas.FirstOrDefault(candidate => FindNode(candidate.Root, nodeId) is not null)
+                    ?? throw new KeyNotFoundException("The selected item is not present in the current scan.");
+                entry = new BrowseEntry(area.Id, FindNode(area.Root, nodeId)!);
+            }
+            if (!_completedAreas.Contains(entry.AreaId))
+                throw new StorageConflictException("This storage layer is still scanning. Try again in a moment.");
+        }
+
+        var node = entry.Node;
+        IReadOnlyList<StorageNode> sample = node.Kind == "file"
+            ? [node]
+            : node.Browsable
+                ? Browse(node.Id, snapshot.Id, 0).Node.Children.Take(24).ToList()
+                : node.Children.Take(24).ToList();
+        var extensions = sample.Where(item => item.Kind == "file")
+            .GroupBy(item => string.IsNullOrWhiteSpace(Path.GetExtension(item.Name))
+                ? "(no extension)" : Path.GetExtension(item.Name).ToLowerInvariant())
+            .OrderByDescending(group => group.Sum(item => item.SizeBytes))
+            .Take(12)
+            .ToDictionary(group => group.Key, group => group.Sum(item => item.SizeBytes));
+        return new StorageAnalysisEvidence(snapshot.Id, node.Id, node.Name, node.LogicalPath,
+            node.Kind, node.Origin, node.Purpose, node.CleanupKind, node.ProtectionReason,
+            node.SizeBytes, node.FileCount, node.DirectoryCount, node.ModifiedAt,
+            node.Kind == "aggregate",
+            sample.Select(item => new StorageEvidenceItem(item.Name, item.Kind, item.SizeBytes,
+                item.FileCount, item.DirectoryCount, item.ModifiedAt)).ToList(), extensions);
+    }
+
     public QuarantineItem Restore(string id)
     {
         var (root, manifest) = ReadQuarantine(id);
@@ -223,6 +369,18 @@ public sealed class StorageService
             {
                 var area = scanner.Scan(spec, ct);
                 areas.Add(area);
+                var directoryNodes = scanner.DrainDirectoryNodes();
+                lock (_gate)
+                {
+                    foreach (var node in directoryNodes)
+                    {
+                        if (node.PhysicalPath is not null)
+                            _directoryIndex[Path.GetFullPath(node.PhysicalPath)] = node;
+                        _browseNodes[node.Id] = new BrowseEntry(spec.Id, node);
+                    }
+                    RegisterTree(spec.Id, area.Root);
+                    _completedAreas.Add(spec.Id);
+                }
                 PublishProgressSnapshot(scanId, started, areas, null);
             }
             var snapshot = new StorageSnapshot(scanId, started, DateTimeOffset.UtcNow,
@@ -296,6 +454,72 @@ public sealed class StorageService
             if (found is not null) return found;
         }
         return null;
+    }
+
+    private void RegisterTree(string areaId, StorageNode node)
+    {
+        _browseNodes[node.Id] = new BrowseEntry(areaId, node);
+        foreach (var child in node.Children) RegisterTree(areaId, child);
+    }
+
+    private static StorageNode CopyForBrowse(StorageNode node, IReadOnlyList<StorageNode> children,
+        bool truncated) => new()
+    {
+        Id = node.Id,
+        Name = node.Name,
+        LogicalPath = node.LogicalPath,
+        Kind = node.Kind,
+        Origin = node.Origin,
+        Purpose = node.Purpose,
+        CleanupKind = node.CleanupKind,
+        ProtectionReason = node.ProtectionReason,
+        SizeBytes = node.SizeBytes,
+        FileCount = node.FileCount,
+        DirectoryCount = node.DirectoryCount,
+        ModifiedAt = node.ModifiedAt,
+        Truncated = truncated,
+        Browsable = node.Browsable,
+        BrowseOffset = node.BrowseOffset,
+        Children = children,
+        PhysicalPath = node.PhysicalPath,
+        AllowedRoot = node.AllowedRoot,
+    };
+
+    private static StorageNode BuildBrowsedFile(string areaId, StorageNode parent, FileInfo file)
+    {
+        var logicalPath = parent.Kind == "aggregate"
+            ? Path.Combine(Path.GetDirectoryName(parent.LogicalPath) ?? parent.LogicalPath, file.Name)
+            : Path.Combine(parent.LogicalPath, file.Name);
+        var atScratchRoot = areaId == "scratch" && parent.AllowedRoot is not null
+            && Path.GetFullPath(parent.PhysicalPath!).TrimEnd(Path.DirectorySeparatorChar)
+                .Equals(Path.GetFullPath(parent.AllowedRoot).TrimEnd(Path.DirectorySeparatorChar),
+                    StringComparison.OrdinalIgnoreCase);
+        var stale = DateTimeOffset.UtcNow - file.LastWriteTimeUtc >= TimeSpan.FromMinutes(30);
+        return new StorageNode
+        {
+            Id = NodeId(areaId, logicalPath),
+            Name = file.Name,
+            LogicalPath = logicalPath,
+            Kind = "file",
+            Origin = atScratchRoot ? "Loose scratch" : parent.Origin,
+            Purpose = atScratchRoot ? "Legacy or untracked scratch" : parent.Purpose,
+            CleanupKind = atScratchRoot && stale ? "quarantine" : "protected",
+            ProtectionReason = atScratchRoot && stale ? null
+                : atScratchRoot ? "Recently modified scratch is protected for 30 minutes."
+                : parent.ProtectionReason ?? "This item is protected.",
+            SizeBytes = file.Length,
+            FileCount = 1,
+            ModifiedAt = file.LastWriteTimeUtc,
+            PhysicalPath = file.FullName,
+            AllowedRoot = parent.AllowedRoot,
+        };
+    }
+
+    private static string NodeId(string area, string logicalPath)
+    {
+        var bytes = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(area + "\n" + logicalPath.ToLowerInvariant()));
+        return Convert.ToHexString(bytes[..12]).ToLowerInvariant();
     }
 
     private (string Root, QuarantineManifest Manifest) ReadQuarantine(string id)
@@ -400,6 +624,8 @@ public sealed class StorageService
         string SnapshotId,
         StorageNode Node,
         DateTimeOffset ExpiresAt);
+
+    private sealed record BrowseEntry(string AreaId, StorageNode Node);
 }
 
 public sealed class StorageConflictException(string message) : Exception(message);

@@ -71,6 +71,18 @@ public sealed class StoragePlugin : ILeafPlugin
             catch (StorageAccessException ex) { return Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode); }
         });
 
+        group.MapPost("/browse", (BrowseRequest request, HttpContext ctx,
+            StorageService storage) => Guard(ctx, () => Results.Ok(
+                storage.Browse(request.NodeId, request.SnapshotId, request.Offset))));
+
+        group.MapPost("/analyze", async (AnalyzeRequest request, HttpContext ctx,
+            StorageService storage, [FromKeyedServices(PluginId)] IComputeJobs compute,
+            CancellationToken ct) => await GuardAsync(ctx, async () =>
+        {
+            var evidence = storage.PrepareAnalysis(request.NodeId, request.SnapshotId);
+            return Results.Ok(await StorageAnalyzer.AnalyzeAsync(evidence, compute, ct));
+        }));
+
         group.MapPost("/cleanup/preview", (CleanupPreviewRequest request, HttpContext ctx,
             StorageService storage) => Guard(ctx, () => Results.Ok(
                 storage.PreviewCleanup(request.NodeId, request.SnapshotId))));

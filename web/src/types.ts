@@ -12,7 +12,29 @@ export interface StorageNode {
   directoryCount: number
   modifiedAt?: string | null
   truncated: boolean
+  browsable: boolean
+  browseOffset: number
   children: StorageNode[]
+}
+
+export interface StorageBrowsePage {
+  node: StorageNode
+  offset: number
+  limit: number
+  total: number
+  hasPrevious: boolean
+  hasNext: boolean
+}
+
+export interface StorageAnalysis {
+  summary: string
+  contents: string[]
+  deletionImpact: string
+  recommendation: "keep" | "quarantine" | "inspect"
+  reasoning: string
+  confidence: number
+  model?: string | null
+  actionAuthority: false
 }
 
 export interface StorageArea {

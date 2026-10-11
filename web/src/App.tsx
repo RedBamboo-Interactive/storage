@@ -5,7 +5,9 @@ import { layoutTreemap } from "./treemap"
 import type {
   CleanupPreview,
   QuarantineItem,
+  StorageAnalysis,
   StorageArea,
+  StorageBrowsePage,
   StorageNode,
   StorageStatus,
 } from "./types"
@@ -15,8 +17,12 @@ const STATUS = "/api/apps/storage/status"
 export function StorageApp() {
   const [status, setStatus] = useState<StorageStatus | null>(null)
   const [areaId, setAreaId] = useState<string | null>(null)
-  const [focusId, setFocusId] = useState<string | null>(null)
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [navigation, setNavigation] = useState<StorageNode[]>([])
+  const [selected, setSelected] = useState<StorageNode | null>(null)
+  const [pageHistory, setPageHistory] = useState<(StorageBrowsePage | null)[]>([])
+  const [browsing, setBrowsing] = useState(false)
+  const [analysis, setAnalysis] = useState<StorageAnalysis | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
   const [preview, setPreview] = useState<CleanupPreview | null>(null)
@@ -25,6 +31,7 @@ export function StorageApp() {
   const [purgeTarget, setPurgeTarget] = useState<string | null>(null)
   const [purgeText, setPurgeText] = useState("")
   const autoStarted = useRef(false)
+  const browseRequest = useRef<string | null>(null)
 
   const loadStatus = useCallback(async () => {
     try {
@@ -66,9 +73,9 @@ export function StorageApp() {
     if (!snapshot) return null
     return snapshot.areas.find(item => item.id === areaId) ?? snapshot.areas[0] ?? null
   }, [snapshot, areaId])
-  const focus = useMemo(() => area ? findNode(area.root, focusId) ?? area.root : null, [area, focusId])
-  const selected = useMemo(() => area ? findNode(area.root, selectedId) ?? focus : null, [area, selectedId, focus])
-  const breadcrumbs = useMemo(() => area && focus ? findPath(area.root, focus.id) : [], [area, focus])
+  const focus = navigation[navigation.length - 1] ?? area?.root ?? null
+  const breadcrumbs = navigation.length > 0 ? navigation : area ? [area.root] : []
+  const browsePage = pageHistory[pageHistory.length - 1] ?? null
   const tiles = useMemo(() => layoutTreemap(focus?.children ?? []), [focus])
   const parent = breadcrumbs.length > 1 ? breadcrumbs[breadcrumbs.length - 2] : null
 
@@ -76,31 +83,100 @@ export function StorageApp() {
     if (!snapshot?.areas.length) return
     const nextArea = snapshot.areas.find(item => item.id === areaId) ?? snapshot.areas[0]
     setAreaId(nextArea.id)
-    setFocusId(nextArea.root.id)
-    setSelectedId(nextArea.root.id)
+    setNavigation([nextArea.root])
+    setSelected(nextArea.root)
+    setPageHistory([null])
   }, [snapshot?.id])
+
+  useEffect(() => {
+    if (!area || navigation.length !== 1 || navigation[0]?.id !== area.root.id) return
+    setNavigation([area.root])
+    if (selected?.id === area.root.id) setSelected(area.root)
+  }, [area?.root])
+
+  useEffect(() => { setAnalysis(null) }, [selected?.id])
 
   const chooseArea = (next: StorageArea) => {
     setAreaId(next.id)
-    setFocusId(next.root.id)
-    setSelectedId(next.root.id)
+    setNavigation([next.root])
+    setSelected(next.root)
+    setPageHistory([null])
   }
 
-  const openNode = (node: StorageNode) => {
-    setSelectedId(node.id)
-    if (node.children.length > 0) setFocusId(node.id)
+  const openNode = async (node: StorageNode) => {
+    setSelected(node)
+    if (!snapshot) return
+    if (node.browsable) {
+      if (browseRequest.current === node.id) return
+      browseRequest.current = node.id
+      setBrowsing(true)
+      setError(null)
+      try {
+        const page = await api.post<StorageBrowsePage>("/api/apps/storage/browse", {
+          nodeId: node.id,
+          snapshotId: snapshot.id,
+          offset: 0,
+        })
+        setNavigation(items => [...items, page.node])
+        setPageHistory(items => [...items, page])
+        setSelected(page.node)
+      } catch (reason) { setError(message(reason)) }
+      finally { browseRequest.current = null; setBrowsing(false) }
+      return
+    }
+    if (node.children.length > 0) {
+      setNavigation(items => [...items, node])
+      setPageHistory(items => [...items, null])
+    }
   }
 
   const goHome = () => {
     if (!area) return
-    setFocusId(area.root.id)
-    setSelectedId(area.root.id)
+    setNavigation([area.root])
+    setSelected(area.root)
+    setPageHistory([null])
   }
 
   const goUp = () => {
     if (!parent) return
-    setFocusId(parent.id)
-    setSelectedId(parent.id)
+    setNavigation(items => items.slice(0, -1))
+    setPageHistory(items => items.slice(0, -1))
+    setSelected(parent)
+  }
+
+  const jumpTo = (index: number) => {
+    const node = breadcrumbs[index]
+    setNavigation(items => items.slice(0, index + 1))
+    setPageHistory(items => items.slice(0, index + 1))
+    setSelected(node)
+  }
+
+  const changePage = async (offset: number) => {
+    if (!focus || !snapshot) return
+    setBrowsing(true)
+    setError(null)
+    try {
+      const page = await api.post<StorageBrowsePage>("/api/apps/storage/browse", {
+        nodeId: focus.id, snapshotId: snapshot.id, offset,
+      })
+      setNavigation(items => [...items.slice(0, -1), page.node])
+      setPageHistory(items => [...items.slice(0, -1), page])
+      setSelected(page.node)
+    } catch (reason) { setError(message(reason)) }
+    finally { setBrowsing(false) }
+  }
+
+  const analyzeSelected = async () => {
+    if (!selected || !snapshot) return
+    setAnalyzing(true)
+    setAnalysis(null)
+    setError(null)
+    try {
+      setAnalysis(await api.post<StorageAnalysis>("/api/apps/storage/analyze", {
+        nodeId: selected.id, snapshotId: snapshot.id,
+      }))
+    } catch (reason) { setError(message(reason)) }
+    finally { setAnalyzing(false) }
   }
 
   const requestCleanup = async () => {
@@ -242,6 +318,11 @@ export function StorageApp() {
                     onClick={goUp} title="Up one level">
                     <i className="ph-bold ph-arrow-up" />
                   </button>
+                  <button className="storage-icon-button" aria-label="Analyze selected item"
+                    disabled={!selected || analyzing || status?.progress.running && !selected.browsable}
+                    onClick={() => void analyzeSelected()} title="Analyze selected item">
+                    <i className={analyzing ? "ph-bold ph-spinner-gap animate-spin" : "ph-bold ph-sparkle"} />
+                  </button>
                 </div>
                 <div className="storage-breadcrumbs">
                   {breadcrumbs.map((node, index) => (
@@ -250,7 +331,7 @@ export function StorageApp() {
                       <button className={index === breadcrumbs.length - 1
                         ? "storage-breadcrumb storage-breadcrumb-current"
                         : "storage-breadcrumb"}
-                        onClick={() => { setFocusId(node.id); setSelectedId(node.id) }}>{node.name}</button>
+                        onClick={() => jumpTo(index)}>{node.name}</button>
                     </span>
                   ))}
                 </div>
@@ -260,13 +341,13 @@ export function StorageApp() {
                 <div key={focus?.id} className="storage-map-stage absolute inset-0">
                   {tiles.length === 0 ? (
                     <div className="absolute inset-0 flex items-center justify-center text-sm text-text-muted">
-                      This branch has no visible children.
+                      {browsing ? "Reading this layer…" : "This branch has no visible children."}
                     </div>
                   ) : tiles.map(tile => (
                     <button key={tile.node.id}
                       className="storage-tile text-left p-2"
                       data-selected={tile.node.id === selected?.id}
-                      data-expandable={tile.node.children.length > 0}
+                      data-expandable={tile.node.browsable || tile.node.children.length > 0}
                       style={{
                         left: `${tile.x}%`, top: `${tile.y}%`,
                         width: `${tile.width}%`, height: `${tile.height}%`,
@@ -274,18 +355,21 @@ export function StorageApp() {
                       }}
                       title={`${tile.node.logicalPath}\n${formatBytes(tile.node.sizeBytes)}`}
                       onClick={() => {
-                        if (tile.node.id === selected?.id && tile.node.children.length > 0) openNode(tile.node)
-                        else setSelectedId(tile.node.id)
+                        if (tile.node.id === selected?.id && (tile.node.browsable || tile.node.children.length > 0))
+                          void openNode(tile.node)
+                        else setSelected(tile.node)
                       }}
-                      onDoubleClick={() => openNode(tile.node)}
+                      onDoubleClick={() => void openNode(tile.node)}
                       onKeyDown={event => {
-                        if (event.key === "Enter" && tile.node.children.length > 0) openNode(tile.node)
+                        if (event.key === "Enter" && (tile.node.browsable || tile.node.children.length > 0))
+                          void openNode(tile.node)
                       }}>
                       {tile.width * tile.height > 55 && (
                         <span className="storage-tile-label block min-w-0">
                           <strong className="flex items-center gap-1 text-xs text-white">
                             <span className="truncate">{tile.node.name}</span>
-                            {tile.node.children.length > 0 && <i className="ph-bold ph-magnifying-glass-plus shrink-0" />}
+                            {(tile.node.browsable || tile.node.children.length > 0) &&
+                              <i className="ph-bold ph-magnifying-glass-plus shrink-0" />}
                           </strong>
                           <small className="block text-[10px] text-white/75 tabular-nums">{formatBytes(tile.node.sizeBytes)}</small>
                         </span>
@@ -294,6 +378,22 @@ export function StorageApp() {
                   ))}
                 </div>
               </div>
+              {browsePage && focus?.id === browsePage.node.id && (
+                <div className="storage-pagination">
+                  <button className="storage-icon-button" aria-label="Previous items"
+                    disabled={!browsePage.hasPrevious || browsing}
+                    onClick={() => void changePage(Math.max(0, browsePage.offset - browsePage.limit))}>
+                    <i className="ph-bold ph-caret-left" />
+                  </button>
+                  <span>{browsePage.total === 0 ? "No items" :
+                    `${browsePage.offset + 1}-${Math.min(browsePage.total, browsePage.offset + browsePage.node.children.length)} of ${browsePage.total}`}</span>
+                  <button className="storage-icon-button" aria-label="Next items"
+                    disabled={!browsePage.hasNext || browsing}
+                    onClick={() => void changePage(browsePage.offset + browsePage.limit)}>
+                    <i className="ph-bold ph-caret-right" />
+                  </button>
+                </div>
+              )}
               <div className="px-4 pb-3 flex items-center justify-between text-[11px] text-text-disabled">
                 <span>Click to inspect. Click the selected tile again, double-click, or press Enter to open it.</span>
                 {area?.logicalOnly && <span>L: is logical usage already backed by RedLeaf's database.</span>}
@@ -328,13 +428,41 @@ export function StorageApp() {
                     )}
                     {selected.truncated && (
                       <p className="storage-note"><i className="ph-bold ph-stack" />
-                        Smaller children are grouped to keep the overview fast. Open the group to inspect its next layer.</p>
+                        This overview is compact. Open it to load a page of concrete files and folders.</p>
                     )}
-                    {selected.children.length > 0 && selected.id !== focus?.id && (
+                    {(selected.browsable || selected.children.length > 0) && selected.id !== focus?.id && (
                       <button className="storage-button storage-button-muted w-full justify-center"
-                        onClick={() => openNode(selected)}>
-                        <i className="ph-bold ph-magnifying-glass-plus" /> Open this branch
+                        disabled={browsing} onClick={() => void openNode(selected)}>
+                        <i className={browsing ? "ph-bold ph-spinner-gap animate-spin" : "ph-bold ph-magnifying-glass-plus"} />
+                        Open concrete contents
                       </button>
+                    )}
+                    {(analysis || analyzing) && (
+                      <div className="storage-analysis-card space-y-2" aria-live="polite">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-sm font-semibold flex items-center gap-1.5">
+                            <i className={analyzing ? "ph-bold ph-spinner-gap animate-spin text-primary" : "ph-bold ph-sparkle text-primary"} />
+                            AI assessment
+                          </div>
+                          {analysis && <span className="text-[10px] uppercase tracking-wide text-text-disabled">
+                            {analysis.recommendation} · {Math.round(analysis.confidence * 100)}%
+                          </span>}
+                        </div>
+                        {analyzing ? <p className="text-xs text-text-muted">Inspecting bounded metadata…</p> : analysis && <>
+                          <p className="text-xs leading-relaxed">{analysis.summary}</p>
+                          {analysis.contents.length > 0 && <ul className="text-xs text-text-muted space-y-1">
+                            {analysis.contents.map((item, index) => <li key={index}>{item}</li>)}
+                          </ul>}
+                          <div>
+                            <div className="text-[10px] uppercase tracking-wide text-text-disabled">If removed</div>
+                            <p className="text-xs text-text-muted mt-0.5">{analysis.deletionImpact}</p>
+                          </div>
+                          <p className="text-xs">{analysis.reasoning}</p>
+                          <p className="text-[10px] text-text-disabled">
+                            Advisory only. No files changed.{analysis.model ? ` ${analysis.model}` : ""}
+                          </p>
+                        </>}
+                      </div>
                     )}
                     {selected.cleanupKind === "quarantine" ? (
                       <div className="rounded-xl border border-amber-500/30 bg-amber-500/8 p-3">
@@ -358,11 +486,12 @@ export function StorageApp() {
                       <div className="space-y-1">
                         {selected.children.slice(0, 12).map(child => (
                           <button key={child.id} className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-overlay-6 text-xs"
-                            onClick={() => openNode(child)}>
+                            onClick={() => void openNode(child)}>
                             <i className={child.kind === "file" ? "ph-bold ph-file" : "ph-bold ph-folder"} />
                             <span className="truncate flex-1 text-left">{child.name}</span>
                             <span className="tabular-nums text-text-muted">{formatBytes(child.sizeBytes)}</span>
-                            {child.children.length > 0 && <i className="ph-bold ph-caret-right text-text-disabled" />}
+                            {(child.browsable || child.children.length > 0) &&
+                              <i className="ph-bold ph-caret-right text-text-disabled" />}
                           </button>
                         ))}
                       </div>
@@ -459,24 +588,6 @@ function SmallMetric({ label, value }: { label: string; value: string }) {
     <div className="text-[10px] uppercase tracking-wide text-text-disabled">{label}</div>
     <div className="text-xs font-medium truncate mt-0.5">{value}</div>
   </div>
-}
-
-function findNode(root: StorageNode, id: string | null): StorageNode | null {
-  if (!id || root.id === id) return root
-  for (const child of root.children) {
-    const found = findNode(child, id)
-    if (found) return found
-  }
-  return null
-}
-
-function findPath(root: StorageNode, id: string): StorageNode[] {
-  if (root.id === id) return [root]
-  for (const child of root.children) {
-    const path = findPath(child, id)
-    if (path.length) return [root, ...path]
-  }
-  return []
 }
 
 const colors = ["#b45309", "#c2410c", "#9f1239", "#6d28d9", "#0369a1", "#0f766e", "#3f6212", "#854d0e"]

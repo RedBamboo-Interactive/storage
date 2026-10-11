@@ -10,17 +10,25 @@ internal sealed class StorageScanner(
 {
     private const int MaxChildren = 64;
     private const int MaxVisibleDepth = 4;
-    private const int MaxAggregateChildren = 16;
     private const int MaxProgressChildren = 24;
     private const int MaxProgressDepth = 2;
     private static readonly TimeSpan PartialPublishInterval = TimeSpan.FromMilliseconds(350);
     private static readonly TimeSpan ActiveSafetyWindow = TimeSpan.FromMinutes(30);
     private readonly Action<string, long, long, long> _report = report;
     private readonly Action<StorageAreaSnapshot>? _publishPartial = publishPartial;
+    private readonly Dictionary<string, StorageNode> _directoryNodes =
+        new(StringComparer.OrdinalIgnoreCase);
     private long _bytes;
     private long _files;
     private long _directories;
     private long _lastPartialTimestamp;
+
+    public IReadOnlyList<StorageNode> DrainDirectoryNodes()
+    {
+        var nodes = _directoryNodes.Values.ToList();
+        _directoryNodes.Clear();
+        return nodes;
+    }
 
     public StorageAreaSnapshot Scan(ScanArea area, CancellationToken ct)
     {
@@ -53,7 +61,7 @@ internal sealed class StorageScanner(
 
     private StorageNode ScanWorkspaces(ScanArea area, CancellationToken ct)
     {
-        var accumulator = new NodeAccumulator(MaxChildren, 6);
+        var accumulator = new NodeAccumulator(MaxChildren);
         foreach (var workspace in area.Workspaces!)
         {
             ct.ThrowIfCancellationRequested();
@@ -61,7 +69,8 @@ internal sealed class StorageScanner(
             var node = ScanDirectory(area, workspace.Path, workspace.AgentName,
                 CombineLogical(area.RootLabel, workspace.AgentName), 1, ct,
                 partial => PublishArea(area, BuildWorkspaceRoot(area, accumulator, partial)),
-                forcedOrigin: workspace.AgentName, forcedPurpose: "Agent workspace");
+                forcedOrigin: workspace.AgentName, forcedPurpose: "Agent workspace",
+                forcedAllowedRoot: workspace.Path);
             accumulator.Add(node);
             PublishArea(area, BuildWorkspaceRoot(area, accumulator));
         }
@@ -72,7 +81,7 @@ internal sealed class StorageScanner(
     private static StorageNode BuildWorkspaceRoot(ScanArea area, NodeAccumulator accumulator,
         StorageNode? current = null)
     {
-        var children = accumulator.Complete(area.Id, area.RootLabel, current);
+        var children = accumulator.Complete(area.Id, area.RootLabel, null, null, current);
         return new StorageNode
         {
             Id = NodeId(area.Id, ""),
@@ -101,7 +110,8 @@ internal sealed class StorageScanner(
         CancellationToken ct,
         Action<StorageNode>? publish = null,
         string? forcedOrigin = null,
-        string? forcedPurpose = null)
+        string? forcedPurpose = null,
+        string? forcedAllowedRoot = null)
     {
         ct.ThrowIfCancellationRequested();
         Interlocked.Increment(ref _directories);
@@ -111,9 +121,7 @@ internal sealed class StorageScanner(
         // browser snapshot is deliberately shallow. Retaining even a bounded set at
         // every directory can still produce hundreds of thousands of JSON nodes on
         // package caches and PostgreSQL data directories.
-        var accumulator = new NodeAccumulator(
-            depth >= MaxVisibleDepth ? 0 : MaxChildren,
-            depth >= MaxVisibleDepth ? MaxAggregateChildren : 6);
+        var accumulator = new NodeAccumulator(depth >= MaxVisibleDepth ? 0 : MaxChildren);
         string? error = null;
         IEnumerable<string> entries;
         try { entries = Directory.EnumerateFileSystemEntries(path); }
@@ -144,12 +152,14 @@ internal sealed class StorageScanner(
                 {
                     var child = ScanDirectory(area, entry, childName, childLogical, depth + 1, ct,
                         partial => publish?.Invoke(BuildDirectoryNode(area, path, name, logicalPath,
-                            depth, accumulator, error, partial, forcedOrigin, forcedPurpose)),
-                        forcedOrigin, forcedPurpose);
+                            depth, accumulator, error, partial, forcedOrigin, forcedPurpose,
+                            forcedAllowedRoot)),
+                        forcedOrigin, forcedPurpose, forcedAllowedRoot);
                     accumulator.Add(child);
                     if (depth <= 1 || ShouldPublishPartial())
                         publish?.Invoke(BuildDirectoryNode(area, path, name, logicalPath,
-                            depth, accumulator, error, null, forcedOrigin, forcedPurpose));
+                            depth, accumulator, error, null, forcedOrigin, forcedPurpose,
+                            forcedAllowedRoot));
                 }
                 else
                 {
@@ -167,7 +177,8 @@ internal sealed class StorageScanner(
                             Report(area.Name);
                             if (ShouldPublishPartial())
                                 publish?.Invoke(BuildDirectoryNode(area, path, name, logicalPath,
-                                    depth, accumulator, error, null, forcedOrigin, forcedPurpose));
+                                    depth, accumulator, error, null, forcedOrigin, forcedPurpose,
+                                    forcedAllowedRoot));
                         }
                     }
                     catch { /* files can disappear while the scan is running */ }
@@ -179,8 +190,10 @@ internal sealed class StorageScanner(
             error ??= ex.Message;
         }
 
-        return BuildDirectoryNode(area, path, name, logicalPath, depth, accumulator, error,
-            null, forcedOrigin, forcedPurpose);
+        var result = BuildDirectoryNode(area, path, name, logicalPath, depth, accumulator, error,
+            null, forcedOrigin, forcedPurpose, forcedAllowedRoot);
+        _directoryNodes[Path.GetFullPath(path)] = Shallow(result);
+        return result;
     }
 
     private static StorageNode BuildDirectoryNode(
@@ -193,7 +206,8 @@ internal sealed class StorageScanner(
         string? error,
         StorageNode? current,
         string? forcedOrigin,
-        string? forcedPurpose)
+        string? forcedPurpose,
+        string? forcedAllowedRoot)
     {
         var modified = TryModified(path);
         var policy = Policy(area, path, depth, isDirectory: true, modified,
@@ -201,7 +215,8 @@ internal sealed class StorageScanner(
         if (error is not null)
             policy = (policy.Origin, policy.Purpose, "protected",
                 "The scan could not read this directory completely: " + error);
-        var children = accumulator.Complete(area.Id, logicalPath, current);
+        var allowedRoot = forcedAllowedRoot ?? area.RootPath;
+        var children = accumulator.Complete(area.Id, logicalPath, path, allowedRoot, current);
         return new StorageNode
         {
             Id = NodeId(area.Id, logicalPath),
@@ -217,9 +232,10 @@ internal sealed class StorageScanner(
             DirectoryCount = accumulator.DirectoryCount + (current?.DirectoryCount ?? 0) + 1,
             ModifiedAt = Max(modified, Max(accumulator.ModifiedAt, current?.ModifiedAt)),
             Truncated = accumulator.Truncated || current?.Truncated == true,
+            Browsable = allowedRoot is not null,
             Children = children,
             PhysicalPath = path,
-            AllowedRoot = area.RootPath,
+            AllowedRoot = allowedRoot,
         };
     }
 
@@ -347,9 +363,7 @@ internal sealed class StorageScanner(
                 DirectoryCount = omitted.Sum(child => child.DirectoryCount),
                 ModifiedAt = omitted.Select(child => child.ModifiedAt).Aggregate(Max),
                 Truncated = true,
-                Children = omitted.Take(8)
-                    .Select(child => CopyNode(child, [], child.Truncated || child.Children.Count > 0))
-                    .ToList(),
+                Children = [],
             });
         }
         return CopyNode(node, children, node.Truncated || omitted.Count > 0);
@@ -371,6 +385,8 @@ internal sealed class StorageScanner(
         DirectoryCount = node.DirectoryCount,
         ModifiedAt = node.ModifiedAt,
         Truncated = truncated,
+        Browsable = node.Browsable,
+        BrowseOffset = node.BrowseOffset,
         Children = children,
         PhysicalPath = node.PhysicalPath,
         AllowedRoot = node.AllowedRoot,
@@ -428,10 +444,30 @@ internal sealed class StorageScanner(
         ProtectionReason = reason,
     };
 
-    private sealed class NodeAccumulator(int capacity, int aggregateCapacity)
+    internal static StorageNode Shallow(StorageNode node) => new()
+    {
+        Id = node.Id,
+        Name = node.Name,
+        LogicalPath = node.LogicalPath,
+        Kind = node.Kind,
+        Origin = node.Origin,
+        Purpose = node.Purpose,
+        CleanupKind = node.CleanupKind,
+        ProtectionReason = node.ProtectionReason,
+        SizeBytes = node.SizeBytes,
+        FileCount = node.FileCount,
+        DirectoryCount = node.DirectoryCount,
+        ModifiedAt = node.ModifiedAt,
+        Truncated = node.Truncated || node.Children.Count > 0,
+        Browsable = node.Browsable,
+        BrowseOffset = node.BrowseOffset,
+        PhysicalPath = node.PhysicalPath,
+        AllowedRoot = node.AllowedRoot,
+    };
+
+    private sealed class NodeAccumulator(int capacity)
     {
         private readonly PriorityQueue<StorageNode, long> _largest = new();
-        private readonly PriorityQueue<StorageNode, long> _aggregateLargest = new();
         private long _otherBytes;
         private long _otherFiles;
         private long _otherDirectories;
@@ -495,17 +531,10 @@ internal sealed class StorageScanner(
             _otherBytes += size;
             _otherFiles++;
             _otherModified = Max(_otherModified, modified);
-            if (aggregateCapacity <= 0) return;
-            if (_aggregateLargest.Count >= aggregateCapacity)
-            {
-                _aggregateLargest.TryPeek(out _, out var smallest);
-                if (size <= smallest) return;
-            }
-            RememberAggregateRepresentative(factory());
         }
 
         public IReadOnlyList<StorageNode> Complete(string area, string logicalPath,
-            StorageNode? current = null)
+            string? physicalPath, string? allowedRoot, StorageNode? current = null)
         {
             var items = _largest.UnorderedItems.Select(item => item.Element)
                 .OrderByDescending(node => node.SizeBytes)
@@ -517,36 +546,6 @@ internal sealed class StorageScanner(
                 .ToList();
             if (Truncated)
             {
-                var aggregateChildren = _aggregateLargest.UnorderedItems
-                    .Select(item => item.Element)
-                    .OrderByDescending(node => node.SizeBytes)
-                    .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
-                var representedBytes = aggregateChildren.Sum(node => node.SizeBytes);
-                var representedFiles = aggregateChildren.Sum(node => node.FileCount);
-                var representedDirectories = aggregateChildren.Sum(node => node.DirectoryCount);
-                var remainderBytes = Math.Max(0, _otherBytes - representedBytes);
-                var remainderFiles = Math.Max(0, _otherFiles - representedFiles);
-                var remainderDirectories = Math.Max(0, _otherDirectories - representedDirectories);
-                if (remainderFiles > 0 || remainderDirectories > 0)
-                {
-                    aggregateChildren.Add(new StorageNode
-                    {
-                        Id = NodeId(area, logicalPath + "\\__other\\__remainder"),
-                        Name = "More small items",
-                        LogicalPath = CombineLogical(logicalPath, "More small items"),
-                        Kind = "aggregate",
-                        Origin = "Mixed",
-                        Purpose = "Remaining smaller items",
-                        CleanupKind = "protected",
-                        ProtectionReason = "This is the remainder of a bounded summary.",
-                        SizeBytes = remainderBytes,
-                        FileCount = remainderFiles,
-                        DirectoryCount = remainderDirectories,
-                        ModifiedAt = _otherModified,
-                        Truncated = true,
-                    });
-                }
                 items.Add(new StorageNode
                 {
                     Id = NodeId(area, logicalPath + "\\__other"),
@@ -562,7 +561,10 @@ internal sealed class StorageScanner(
                     DirectoryCount = _otherDirectories,
                     ModifiedAt = _otherModified,
                     Truncated = true,
-                    Children = aggregateChildren,
+                    Browsable = physicalPath is not null && allowedRoot is not null,
+                    BrowseOffset = capacity,
+                    PhysicalPath = physicalPath,
+                    AllowedRoot = allowedRoot,
                 });
             }
             return items;
@@ -582,40 +584,6 @@ internal sealed class StorageScanner(
             _otherFiles += node.FileCount;
             _otherDirectories += node.DirectoryCount;
             _otherModified = Max(_otherModified, node.ModifiedAt);
-            RememberAggregateRepresentative(Shallow(node));
         }
-
-        private void RememberAggregateRepresentative(StorageNode node)
-        {
-            if (aggregateCapacity <= 0) return;
-            if (_aggregateLargest.Count < aggregateCapacity)
-            {
-                _aggregateLargest.Enqueue(node, node.SizeBytes);
-                return;
-            }
-            _aggregateLargest.TryPeek(out _, out var smallest);
-            if (node.SizeBytes <= smallest) return;
-            _aggregateLargest.Dequeue();
-            _aggregateLargest.Enqueue(node, node.SizeBytes);
-        }
-
-        private static StorageNode Shallow(StorageNode node) => new()
-        {
-            Id = node.Id,
-            Name = node.Name,
-            LogicalPath = node.LogicalPath,
-            Kind = node.Kind,
-            Origin = node.Origin,
-            Purpose = node.Purpose,
-            CleanupKind = node.CleanupKind,
-            ProtectionReason = node.ProtectionReason,
-            SizeBytes = node.SizeBytes,
-            FileCount = node.FileCount,
-            DirectoryCount = node.DirectoryCount,
-            ModifiedAt = node.ModifiedAt,
-            Truncated = node.Truncated || node.Children.Count > 0,
-            PhysicalPath = node.PhysicalPath,
-            AllowedRoot = node.AllowedRoot,
-        };
     }
 }
