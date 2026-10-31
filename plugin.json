@@ -2,7 +2,7 @@
   "id": "storage",
   "name": "Storage",
   "version": "0.1.0",
-  "kernelApi": "^0.1.0",
+  "kernelApi": "^0.1.7",
   "description": "Visualize RedLeaf storage across scratch, Agent workspaces, and application data with guarded cleanup.",
   "icon": "ph-hard-drives",
   "color": "orange",
