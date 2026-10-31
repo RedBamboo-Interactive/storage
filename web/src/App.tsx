@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { PanelHeader, ScrollArea } from "@redbamboo/ui"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { PanelHeader, ScrollArea, useContextTarget, type ContextMenuEntry } from "@redbamboo/ui"
 import { api } from "./api"
-import { layoutTreemap } from "./treemap"
+import { fileSubjectOf, quarantineRowEntries, storageTileEntries } from "./lib/storage-actions"
+import { layoutTreemap, type Tile } from "./treemap"
 import type {
   CleanupPreview,
   QuarantineItem,
@@ -166,26 +167,28 @@ export function StorageApp() {
     finally { setBrowsing(false) }
   }
 
-  const analyzeSelected = async () => {
-    if (!selected || !snapshot) return
+  const analyzeSelected = async (target: StorageNode | null = selected) => {
+    if (!target || !snapshot) return
+    if (target !== selected) setSelected(target)
     setAnalyzing(true)
     setAnalysis(null)
     setError(null)
     try {
       setAnalysis(await api.post<StorageAnalysis>("/api/apps/storage/analyze", {
-        nodeId: selected.id, snapshotId: snapshot.id,
+        nodeId: target.id, snapshotId: snapshot.id,
       }))
     } catch (reason) { setError(message(reason)) }
     finally { setAnalyzing(false) }
   }
 
-  const requestCleanup = async () => {
-    if (!selected || !snapshot) return
+  const requestCleanup = async (target: StorageNode | null = selected) => {
+    if (!target || !snapshot) return
+    if (target !== selected) setSelected(target)
     setWorking(true)
     setError(null)
     try {
       setPreview(await api.post<CleanupPreview>("/api/apps/storage/cleanup/preview", {
-        nodeId: selected.id,
+        nodeId: target.id,
         snapshotId: snapshot.id,
       }))
     } catch (reason) {
@@ -344,37 +347,18 @@ export function StorageApp() {
                       {browsing ? "Reading this layer…" : "This branch has no visible children."}
                     </div>
                   ) : tiles.map(tile => (
-                    <button key={tile.node.id}
-                      className="storage-tile text-left p-2"
-                      data-selected={tile.node.id === selected?.id}
-                      data-expandable={tile.node.browsable || tile.node.children.length > 0}
-                      style={{
-                        left: `${tile.x}%`, top: `${tile.y}%`,
-                        width: `${tile.width}%`, height: `${tile.height}%`,
-                        background: colorFor(tile.node.origin, tile.node.kind === "aggregate"),
-                      }}
-                      title={`${tile.node.logicalPath}\n${formatBytes(tile.node.sizeBytes)}`}
-                      onClick={() => {
-                        if (tile.node.id === selected?.id && (tile.node.browsable || tile.node.children.length > 0))
-                          void openNode(tile.node)
-                        else setSelected(tile.node)
-                      }}
-                      onDoubleClick={() => void openNode(tile.node)}
-                      onKeyDown={event => {
-                        if (event.key === "Enter" && (tile.node.browsable || tile.node.children.length > 0))
-                          void openNode(tile.node)
-                      }}>
-                      {tile.width * tile.height > 55 && (
-                        <span className="storage-tile-label block min-w-0">
-                          <strong className="flex items-center gap-1 text-xs text-white">
-                            <span className="truncate">{tile.node.name}</span>
-                            {(tile.node.browsable || tile.node.children.length > 0) &&
-                              <i className="ph-bold ph-magnifying-glass-plus shrink-0" />}
-                          </strong>
-                          <small className="block text-[10px] text-white/75 tabular-nums">{formatBytes(tile.node.sizeBytes)}</small>
-                        </span>
-                      )}
-                    </button>
+                    <StorageTile key={tile.node.id} tile={tile} selected={tile.node.id === selected?.id}
+                      onSelect={() => setSelected(tile.node)} onOpen={() => void openNode(tile.node)}
+                      menu={() => storageTileEntries({
+                        node: { ...tile.node, childCount: tile.node.children.length },
+                        scanning: !!status?.progress.running,
+                        working,
+                        analyzing,
+                        browsing,
+                        onOpen: () => void openNode(tile.node),
+                        onAnalyze: () => void analyzeSelected(tile.node),
+                        onQuarantine: () => void requestCleanup(tile.node),
+                      })} />
                   ))}
                 </div>
               </div>
@@ -540,7 +524,11 @@ export function StorageApp() {
             <div className="mt-4 max-h-[55vh] overflow-y-auto space-y-2">
               {trash.length === 0 && <p className="text-sm text-text-muted py-8 text-center">Quarantine is empty.</p>}
               {trash.map(item => (
-                <div key={item.id} className="rounded-lg border border-overlay-8 bg-overlay-3 p-3">
+                <QuarantineRow key={item.id} menu={() => quarantineRowEntries({
+                  working,
+                  onRestore: () => void restore(item.id),
+                  onPurge: () => { setPurgeTarget(item.id); setPurgeText("") },
+                })}>
                   <div className="flex gap-3 items-start">
                     <i className={item.directory ? "ph-bold ph-folder text-primary mt-0.5" : "ph-bold ph-file text-primary mt-0.5"} />
                     <div className="min-w-0 flex-1">
@@ -565,7 +553,7 @@ export function StorageApp() {
                       </div>
                     </div>
                   )}
-                </div>
+                </QuarantineRow>
               ))}
             </div>
           </div>
@@ -573,6 +561,61 @@ export function StorageApp() {
       )}
     </div>
   )
+}
+
+/**
+ * A treemap tile. It owns its ref so it registers as a Leaf context-menu
+ * target from its first render; a folder or file it stands for is a `file`
+ * subject, so Code's "Open in Code" can attach.
+ */
+function StorageTile({ tile, selected, onSelect, onOpen, menu }: {
+  tile: Tile
+  selected: boolean
+  onSelect: () => void
+  onOpen: () => void
+  menu: () => ContextMenuEntry[]
+}) {
+  const ref = useRef<HTMLButtonElement>(null)
+  const subject = fileSubjectOf(tile.node)
+  useContextTarget(ref, () => menu(), subject ? { kind: "file", subject } : {})
+  const expandable = tile.node.browsable || tile.node.children.length > 0
+  return (
+    <button ref={ref}
+      className="storage-tile text-left p-2"
+      data-selected={selected}
+      data-expandable={expandable}
+      style={{
+        left: `${tile.x}%`, top: `${tile.y}%`,
+        width: `${tile.width}%`, height: `${tile.height}%`,
+        background: colorFor(tile.node.origin, tile.node.kind === "aggregate"),
+      }}
+      title={`${tile.node.logicalPath}\n${formatBytes(tile.node.sizeBytes)}`}
+      onClick={() => {
+        if (selected && expandable) onOpen()
+        else onSelect()
+      }}
+      onDoubleClick={onOpen}
+      onKeyDown={event => {
+        if (event.key === "Enter" && expandable) onOpen()
+      }}>
+      {tile.width * tile.height > 55 && (
+        <span className="storage-tile-label block min-w-0">
+          <strong className="flex items-center gap-1 text-xs text-white">
+            <span className="truncate">{tile.node.name}</span>
+            {expandable && <i className="ph-bold ph-magnifying-glass-plus shrink-0" />}
+          </strong>
+          <small className="block text-[10px] text-white/75 tabular-nums">{formatBytes(tile.node.sizeBytes)}</small>
+        </span>
+      )}
+    </button>
+  )
+}
+
+/** A quarantine row, registered as a Leaf context-menu target from its first render. */
+function QuarantineRow({ menu, children }: { menu: () => ContextMenuEntry[]; children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useContextTarget(ref, () => menu())
+  return <div ref={ref} className="rounded-lg border border-overlay-8 bg-overlay-3 p-3">{children}</div>
 }
 
 function Metric({ icon, label, value }: { icon: string; label: string; value: string }) {
