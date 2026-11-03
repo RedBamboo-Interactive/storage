@@ -45,7 +45,7 @@ public sealed class StoragePlugin : ILeafPlugin
                 return Results.Ok(storage.Status());
             }
             catch (StorageAccessException ex) { return Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode); }
-        });
+        }).WithSummary("Returns the current storage scan progress and the latest snapshot, which updates while a scan runs.");
 
         group.MapPost("/scan", async (HttpContext ctx, StorageService storage,
             [FromKeyedServices(PluginId)] IEntityStore store,
@@ -69,11 +69,12 @@ public sealed class StoragePlugin : ILeafPlugin
                 return Results.Accepted(value: storage.StartScan(workspaces, names));
             }
             catch (StorageAccessException ex) { return Results.Json(new { error = ex.Message }, statusCode: ex.StatusCode); }
-        });
+        }).WithSummary("Starts a background scan of scratch, Agent workspaces and RedLeaf data and returns 202 with the progress. If a scan is already running it returns that scan's progress instead; poll GET /status for results.");
 
         group.MapPost("/browse", (BrowseRequest request, HttpContext ctx,
             StorageService storage) => Guard(ctx, () => Results.Ok(
-                storage.Browse(request.NodeId, request.SnapshotId, request.Offset))));
+                storage.Browse(request.NodeId, request.SnapshotId, request.Offset))))
+            .WithSummary("Loads one page of the concrete files and folders under a scanned directory or an Other items group. Body: nodeId (required), snapshotId and offset (optional).");
 
         group.MapPost("/analyze", async (AnalyzeRequest request, HttpContext ctx,
             StorageService storage, IComputeJobs compute,
@@ -81,25 +82,30 @@ public sealed class StoragePlugin : ILeafPlugin
         {
             var evidence = storage.PrepareAnalysis(request.NodeId, request.SnapshotId);
             return Results.Ok(await StorageAnalyzer.AnalyzeAsync(evidence, compute, ct));
-        }));
+        })).WithSummary("Returns an advisory summary and suggested next action for a scanned item, based on names, sizes and counts only. It never reads file contents or changes anything. Body: nodeId (required), snapshotId (optional).");
 
         group.MapPost("/cleanup/preview", (CleanupPreviewRequest request, HttpContext ctx,
             StorageService storage) => Guard(ctx, () => Results.Ok(
-                storage.PreviewCleanup(request.NodeId, request.SnapshotId))));
+                storage.PreviewCleanup(request.NodeId, request.SnapshotId))))
+            .WithSummary("Checks that a scanned item can be cleaned up and returns a confirmation token valid for two minutes. Nothing is moved; it needs a finished scan, and protected items are rejected with 409. Body: nodeId (required), snapshotId (optional).");
 
         group.MapPost("/cleanup/quarantine", async (CleanupCommitRequest request, HttpContext ctx,
             StorageService storage, CancellationToken ct) =>
-            await GuardAsync(ctx, async () => Results.Ok(await storage.QuarantineAsync(request.Token, ct))));
+            await GuardAsync(ctx, async () => Results.Ok(await storage.QuarantineAsync(request.Token, ct))))
+            .WithSummary("Moves the item from a cleanup preview token into quarantine, where it can be restored. The token is single use. Body: token (required) from POST /cleanup/preview.");
 
         group.MapGet("/quarantine", (HttpContext ctx, StorageService storage)
-            => Guard(ctx, () => Results.Ok(new { items = storage.ListQuarantine() })));
+            => Guard(ctx, () => Results.Ok(new { items = storage.ListQuarantine() })))
+            .WithSummary("Lists the quarantined items that can be restored or permanently deleted.");
 
         group.MapPost("/quarantine/{id}/restore", (string id, HttpContext ctx,
-            StorageService storage) => Guard(ctx, () => Results.Ok(storage.Restore(id))));
+            StorageService storage) => Guard(ctx, () => Results.Ok(storage.Restore(id))))
+            .WithSummary("Moves a quarantined item back to its original path. Fails with 409 if something already exists at that path.");
 
         group.MapPost("/quarantine/{id}/purge", (string id, PurgeRequest request,
             HttpContext ctx, StorageService storage) =>
-            Guard(ctx, () => Results.Ok(storage.Purge(id, request.Confirmation))));
+            Guard(ctx, () => Results.Ok(storage.Purge(id, request.Confirmation))))
+            .WithSummary("Permanently deletes a quarantined item, which cannot be undone. Body: confirmation (required) must equal the quarantine id exactly.");
     }
 
     public Task OnStartupAsync(IPluginHost host, CancellationToken ct) => Task.CompletedTask;
